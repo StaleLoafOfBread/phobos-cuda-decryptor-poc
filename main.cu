@@ -270,6 +270,23 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
     return;
 }
 
+void showConfig()
+{
+    std::cout << "Usage Config:" << std::endl;
+    std::cout << "BATCH_SIZE=" << BATCH_SIZE << std::endl;
+
+    const char *CUDA_VISIBLE_DEVICES = std::getenv("CUDA_VISIBLE_DEVICES");
+    std::cout << "CUDA_VISIBLE_DEVICES=";
+    if (CUDA_VISIBLE_DEVICES != nullptr)
+    {
+        std::cout << CUDA_VISIBLE_DEVICES << std::endl;
+    }
+    else
+    {
+        std::cout << "<NOT SET>" << std::endl;
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc <= 2)
@@ -299,6 +316,13 @@ int main(int argc, char *argv[])
         brute(phobos, &range);
         return 0;
     }
+
+    if (std::string(argv[1]) == "show" && std::string(argv[2]) == "config")
+    {
+        showConfig();
+        return 0;
+    }
+
     std::cout << "No, I don't think I will" << std::endl;
     return 2;
 }
