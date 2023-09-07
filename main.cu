@@ -274,20 +274,23 @@ int main(int argc, char *argv[])
 {
     if (argc <= 2)
     {
+        std::cout << "Usage:" << std::endl;
+        std::cout << "./bruter show config" << std::endl;
         std::cout << "./bruter keyspace [config]" << std::endl;
         std::cout << "./bruter crack [config] [clear_file] [enc_file] [start] [end]" << std::endl;
         return 1;
     }
 
-    BruteforceRange range = BruteforceRange::parse(argv[2]);
-
     if (std::string(argv[1]) == "keyspace")
     {
+        BruteforceRange range = BruteforceRange::parse(argv[2]);
         std::cout << range.keyspace() << std::endl;
         return 0;
     }
+
     if (std::string(argv[1]) == "crack")
     {
+        BruteforceRange range = BruteforceRange::parse(argv[2]);
         char *endx;
         uint64_t start = std::strtoull(argv[5], &endx, 10);
         uint64_t end = std::strtoull(argv[6], &endx, 10);
@@ -296,6 +299,6 @@ int main(int argc, char *argv[])
         brute(phobos, &range);
         return 0;
     }
-    std::cout << "No, I don't think I will\n";
+    std::cout << "No, I don't think I will" << std::endl;
     return 2;
 }
