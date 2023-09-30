@@ -158,12 +158,18 @@ public:
 
         // Encrypted file format:
         //     data: N bytes
-        //     footer: 172 bytes
-        // Footer format (interesting fields):
-        //      iv: 20:36 bytes
-        //      padded_size: 36:40 bytes
-        //      encrypted_key: 40:168 bytes
-        //      footer_total_size: 168:170 bytes
+        //     footer (metadata): 178 bytes
+        // Footer (metadata) format:
+        //      padded w/ zeros: 0-20               (length: 20 bytes)
+        //      iv: 20-36 bytes                     (length: 16 bytes)
+        //      padded_size: 36-40 bytes            (length: 4 bytes)
+        //      encrypted_key: 40-168 bytes         (length: 128 bytes)
+        //      additional_data_size: 168-172 bytes (length: 4 bytes)
+        //      attacker_id: 172-178 bytes          (length: 6 bytes)
+
+        // Read in the IV by seek to the start of it then reading 16 bytes
+        // 158 = 178 - 20
+        // 158 = 6 + 4 + 128 + 4 + 16
         cipherf.seekg(-158, std::ios::end);
         cipherf.read(reinterpret_cast<char *>(iv.data()), 16);
 
