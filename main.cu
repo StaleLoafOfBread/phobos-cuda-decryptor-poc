@@ -198,70 +198,102 @@ bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses
 
 void brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
+    // Record the start time to measure the overall execution time.
     auto gt1 = std::chrono::high_resolution_clock::now();
     std::cout << "Okay, let's crack some keys!\n";
 
+    // Define data structures for packets and ciphertext on both CPU and GPU.
     Packets packets_gpu, packets_cpu;
     uint8_t *ciphertext_gpu;
 
+    // Allocate memory for packet data on CPU and GPU.
+    std::cout << "Allocating memory for packet data on CPU and GPU\n";
     cudaMallocHost(&packets_cpu.data, BATCH_SIZE * sizeof(Packet));
     cudaMalloc(&packets_gpu.data, BATCH_SIZE * sizeof(Packet));
 
+    // Allocate memory for packet statuses on CPU and GPU.
+    std::cout << "Allocating memory for packet statuses on CPU and GPU\n";
     cudaMallocHost(&packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
     cudaMalloc(&packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
 
+    // Allocate memory for ciphertext on GPU.
+    std::cout << "Allocating memory for ciphertext on GPU\n";
     cudaMalloc(&ciphertext_gpu, 16);
 
-    // Initialise all the packets to the finished state.
+    // Initialise all packets to the 'Done' state.
+    std::cout << "Initializing all packets\n";
     for (int x = 0; x < BATCH_SIZE; x++)
     {
         packets_cpu.statuses[x] = PacketStatus::Done;
     }
+
+    // Copy packet data and statuses from CPU to GPU.
+    std::cout << "Copying packet data and statuses from CPU to GPU\n";
     cudaMemcpy(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
     cudaMemcpy(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
+
+    // Copy the ciphertext from the PhobosInstance to GPU.
+    std::cout << "Copying the ciphertext from the PhobosInstance to GPU\n";
     cudaMemcpy(ciphertext_gpu, phobos.ciphertext().data(), 16, cudaMemcpyHostToDevice);
 
+    // Enter an infinite loop for the brute-force attack.
     while (true)
     {
+        // Calculate the percentage of progress and display the current state.
         float percent = range->progress() * 100.0;
         std::cout << "\nState: " << range->current() << " (" << percent << "%)\n";
+
+        // Record the start time for measuring the duration of each batch.
         auto t1 = std::chrono::high_resolution_clock::now();
 
-        std::cout << "Starting the SHA task\n";
+        // Start the SHA task on GPU.
+        std::cout << "Starting the SHA task on GPU\n";
         sha_rounds<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses);
 
-        std::cout << "Starting the AES task\n";
+        // Start the AES task on GPU.
+        std::cout << "Starting the AES task on GPU\n";
         aes_decrypt<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses, ciphertext_gpu);
 
-        std::cout << "Waiting for tasks\n";
+        // Wait for CUDA tasks to complete and copy results back to CPU.
+        std::cout << "Copying GPU results to CPU\n";
         cudaMemcpy(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost);
         cudaMemcpy(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost);
 
-        std::cout << "Doing the CPU task\n";
+        // Perform CPU task: Check if the plaintext_cbc matches any packet.
+        std::cout << "Starting the CPU task to check for match\n";
         if (find_needle(phobos, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
+            std::cout << "Found needle\n";
             return;
         }
+
+        // Rotate keys and check if the full range is scanned.
+        std::cout << "Rotating keys\n";
         if (rotate_keys(range, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
+            std::cout << "Keyspace exhausted and nothing found\n";
             return;
         }
+
         std::cout << "CPU task done!\n";
 
-        // copy the next batch of tasks to GPU
+        // Copy the next batch of tasks from CPU to GPU asynchronously.
         cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
         cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
 
+        // Record the end time of the batch and calculate its duration.
         auto t2 = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-        std::cout << "Batch has taken: " << ((float)duration / 1000000) << "s" << std::endl
+        auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+        std::cout << "Batch total time: " << ((float)duration2 / 1000000) << "s" << std::endl
                   << std::endl;
     }
 
+    // Record the end time of the brute-force attack and calculate total duration.
     auto gt2 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(gt2 - gt1).count();
-    std::cout << "Total time: " << ((float)duration / 1000000) << std::endl;
+    std::cout << "\nTotal time: " << ((float)duration / 1000000) << std::endl;
 
+    // Free allocated memory on CPU and GPU.
     cudaFree(packets_cpu.data);
     cudaFree(packets_gpu.data);
     cudaFree(packets_cpu.statuses);
