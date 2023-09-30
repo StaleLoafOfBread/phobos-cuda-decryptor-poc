@@ -9,6 +9,8 @@
 #include "aes256.h"
 #include "bruteforce_range.h"
 
+#include <iomanip>
+#include <ios>
 __device__ const uint8_t key_high[] = {
     0x0d,
     0xdb,
@@ -111,28 +113,47 @@ public:
     PhobosInstance(Block16 plaintext, Block16 iv, Block16 ciphertext)
         : plaintext_(plaintext), iv_(iv), ciphertext_(ciphertext), plaintex_cbc_(plaintext)
     {
+        // Bitwise XOR with the IV to start the Cipher Block Chaining for the entire plaintext
         for (int x = 0; x < 16; x++)
         {
             plaintex_cbc_[x] ^= iv[x];
         }
+
+        std::cout << "Bytes of plaintex_cbc: 0x";
+        for (int i = 0; i < 16; i++)
+        {
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                      << (0xff & static_cast<uint32_t>(plaintex_cbc_[i]));
+        }
+        std::cout << std::endl;
     }
 
 public:
+    // Accessors for different block types:
+    // The plaintext, the initial vector (iv), the ciphertext, and the plain text processed by CBC cipher
     const Block16 &plaintext() const { return plaintext_; }
     const Block16 &iv() const { return iv_; }
     const Block16 &ciphertext() const { return ciphertext_; }
     const Block16 &plaintext_cbc() const { return plaintex_cbc_; }
 
+    // Static function to load plaintext and encrypted files
     static PhobosInstance load(const std::string &plain, const std::string &encrypted)
     {
+        // Three block16 variables that hold plaintext, iv and ciphertext values
         Block16 plaintext, iv, ciphertext;
 
+        // Open the plaintext file in binary mode
         std::ifstream plainf(plain, std::ios::binary);
+        // Set to throw an exception if a stream error occurs
         plainf.exceptions(std::ifstream::badbit);
+        // Read 16 bytes from the plaintext file into the Block16 'plaintext'
         plainf.read(reinterpret_cast<char *>(plaintext.data()), 16);
 
+        // Open the encrypted file in binary mode
         std::ifstream cipherf(encrypted, std::ios::binary);
+        // Set to throw an exception if a stream error occurs
         cipherf.exceptions(std::ifstream::badbit);
+        // Read the first 16 bytes from the encrypted file into the Block16 'ciphertext'
         cipherf.read(reinterpret_cast<char *>(ciphertext.data()), 16);
 
         // Encrypted file format:
@@ -146,6 +167,25 @@ public:
         cipherf.seekg(-158, std::ios::end);
         cipherf.read(reinterpret_cast<char *>(iv.data()), 16);
 
+        // Display all the bytes of the IV for debugging purposes
+        std::cout << "Bytes of IV:           0x";
+        for (int i = 0; i < 16; i++)
+        {
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                      << (0xff & static_cast<uint32_t>(iv[i]));
+        }
+        std::cout << std::endl;
+
+        // Display all the bytes of the plaintext for debugging purposes
+        std::cout << "Bytes of plaintext:    0x";
+        for (int i = 0; i < 16; i++)
+        {
+            std::cout << std::hex << std::setw(2) << std::setfill('0')
+                      << (0xff & static_cast<uint32_t>(plaintext[i]));
+        }
+        std::cout << std::endl;
+
+        // Return a new PhobosInstance object created by the loaded plaintext, iv, and ciphertext
         return PhobosInstance(plaintext, iv, ciphertext);
     }
 };
@@ -169,6 +209,8 @@ bool find_needle(const PhobosInstance &phobos, Packet packets[], PacketStatus st
                 printf("%02x", packets[i][q]);
             }
             std::cout << ("\n");
+
+            // We found the key so return true
             return true;
         }
     }
