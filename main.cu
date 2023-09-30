@@ -264,7 +264,7 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
         if (find_needle(phobos, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
             std::cout << "Found needle\n";
-            return;
+            break;
         }
 
         // Rotate keys and check if the full range is scanned.
@@ -272,7 +272,7 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
         if (rotate_keys(range, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
             std::cout << "Keyspace exhausted and nothing found\n";
-            return;
+            break;
         }
 
         std::cout << "CPU task done!\n";
