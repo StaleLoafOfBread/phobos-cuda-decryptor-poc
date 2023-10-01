@@ -282,19 +282,26 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
     cudaMemcpy(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
     cudaMemcpy(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
 
-    // Copy the ciphertext from the PhobosInstance to GPU.
-    std::cout << "Copying the ciphertext from the PhobosInstance to GPU\n";
+    // Copy the ciphertext from the PhobosInstance from CPU to GPU.
+    std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n";
     cudaMemcpy(ciphertext_gpu, phobos.ciphertext().data(), 16, cudaMemcpyHostToDevice);
+
+    // Delcare outside the loop to prevent reinitialization
+    // Compiler might be doing this under the hood but just in case...
+    float percent = 0.0f;
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto t2 = std::chrono::high_resolution_clock::now();
+    auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
 
     // Enter an infinite loop for the brute-force attack.
     while (true)
     {
         // Calculate the percentage of progress and display the current state.
-        float percent = range->progress() * 100.0;
+        percent = range->progress() * 100.0;
         std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
 
         // Record the start time for measuring the duration of each batch.
-        auto t1 = std::chrono::high_resolution_clock::now();
+        t1 = std::chrono::high_resolution_clock::now();
 
         // Start the SHA task on GPU.
         std::cout << "Starting the SHA task on GPU\n";
@@ -338,8 +345,8 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
         }
 
         // Record the end time of the batch and calculate its duration.
-        auto t2 = std::chrono::high_resolution_clock::now();
-        auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+        t2 = std::chrono::high_resolution_clock::now();
+        duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
         std::cout << "Batch total time: " << ((float)duration2 / 1000000) << "s" << std::endl
                   << std::endl;
     }
