@@ -125,7 +125,7 @@ public:
             std::cout << std::hex << std::setw(2) << std::setfill('0')
                       << (0xff & static_cast<uint32_t>(plaintex_cbc_[i]));
         }
-        std::cout << std::endl;
+        std::cout << std::dec << std::endl;
     }
 
 public:
@@ -180,7 +180,7 @@ public:
             std::cout << std::hex << std::setw(2) << std::setfill('0')
                       << (0xff & static_cast<uint32_t>(iv[i]));
         }
-        std::cout << std::endl;
+        std::cout << std::dec << std::endl;
 
         // Display all the bytes of the plaintext for debugging purposes
         std::cout << "Bytes of plaintext:    0x";
@@ -189,7 +189,7 @@ public:
             std::cout << std::hex << std::setw(2) << std::setfill('0')
                       << (0xff & static_cast<uint32_t>(plaintext[i]));
         }
-        std::cout << std::endl;
+        std::cout << std::dec << std::endl;
 
         // Return a new PhobosInstance object created by the loaded plaintext, iv, and ciphertext
         return PhobosInstance(plaintext, iv, ciphertext);
@@ -246,6 +246,7 @@ bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses
 
 void brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
+
     // Record the start time to measure the overall execution time.
     auto gt1 = std::chrono::high_resolution_clock::now();
     std::cout << "Okay, let's crack some keys!\n";
@@ -329,6 +330,12 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
         cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
         cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
 
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess)
+        {
+            printf("CUDA Error: %s\n", cudaGetErrorString(err));
+        }
+
         // Record the end time of the batch and calculate its duration.
         auto t2 = std::chrono::high_resolution_clock::now();
         auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
@@ -350,6 +357,28 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
     return;
 }
 
+void showCudaDeviceProp(int device_idx = 0)
+{
+    cudaDeviceProp deviceProp;
+    cudaError_t err = cudaGetDeviceProperties(&deviceProp, device_idx);
+
+    if (err != cudaSuccess)
+    {
+        std::cerr << "Error fetching device properties: " << cudaGetErrorString(err) << std::endl;
+    }
+    else
+    {
+        std::cout << "Device Name: " << deviceProp.name << std::endl;
+        std::cout << "Maximum number of threads per block: " << deviceProp.maxThreadsPerBlock << std::endl;
+        std::cout << "Maximum shared memory available per block in bytes: " << deviceProp.sharedMemPerBlock << std::endl;
+        std::cout << "Total number of registers available per block: " << deviceProp.regsPerBlock << std::endl;
+        std::cout << "Maximum size for each dimension of a block: (" << deviceProp.maxThreadsDim[0] << ", " << deviceProp.maxThreadsDim[1] << ", " << deviceProp.maxThreadsDim[2] << ")" << std::endl;
+        std::cout << "Maximum size for each dimension of a grid: (" << deviceProp.maxGridSize[0] << ", " << deviceProp.maxGridSize[1] << ", " << deviceProp.maxGridSize[2] << ")" << std::endl;
+    }
+
+    return;
+}
+
 void showConfig()
 {
     std::cout << "Usage Config:" << std::endl;
@@ -365,6 +394,19 @@ void showConfig()
     {
         std::cout << "<NOT SET>" << std::endl;
     }
+
+    int nDevices;
+    cudaError_t err = cudaGetDeviceCount(&nDevices);
+
+    if (err != cudaSuccess)
+    {
+        std::cerr << "Failed to retrieve number of CUDA devices: " << cudaGetErrorString(err) << std::endl;
+        return;
+    }
+
+    std::cout << "Number of CUDA GPUs detected: " << nDevices << std::endl;
+
+    showCudaDeviceProp();
 }
 
 int main(int argc, char *argv[])
