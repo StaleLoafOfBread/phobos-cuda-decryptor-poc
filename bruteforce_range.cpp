@@ -15,9 +15,11 @@ using json = nlohmann::json;
 // a=10010001
 // b=10010111
 // the common prefix is [10010] and the suffix is [001] or [111] - 3 bits
-uint64_t variable_suffix_bits(uint64_t a, uint64_t b) {
+uint64_t variable_suffix_bits(uint64_t a, uint64_t b)
+{
     uint64_t suffix_len = 0;
-    while (a != b) {
+    while (a != b)
+    {
         suffix_len += 1;
         a >>= 1;
         b >>= 1;
@@ -25,7 +27,8 @@ uint64_t variable_suffix_bits(uint64_t a, uint64_t b) {
     return suffix_len;
 }
 
-void BruteforceRange::perfcounter_xor_set() {
+void BruteforceRange::perfcounter_xor_set()
+{
     uint64_t min_pc = perfcounter_.get();
     uint64_t max_pc = perfcounter_.get() + MAX_TICKS_DIFF;
 
@@ -40,7 +43,8 @@ void BruteforceRange::perfcounter_xor_set() {
     uint64_t gtc_prefix = (min_gtc & pc_mask);
     uint64_t min_pc2 = min_pc ^ gtc_prefix;
     uint64_t max_pc2 = max_pc ^ gtc_prefix;
-    if (max_pc2 < min_pc2) {
+    if (max_pc2 < min_pc2)
+    {
         std::swap(min_pc2, max_pc2);
     }
 
@@ -51,24 +55,29 @@ void BruteforceRange::perfcounter_xor_set() {
 }
 
 // Moves the internal state one step forward. Returns false if the range is done.
-bool BruteforceRange::forward() {
-    if (perfcounter_xor_.next()) {
+bool BruteforceRange::forward()
+{
+    if (perfcounter_xor_.next())
+    {
         return true;
     }
 
     tried_++;
-    if (perfcounter_.next()) {
+    if (perfcounter_.next())
+    {
         perfcounter_xor_set();
         return true;
     }
     perfcounter_xor_set();
 
-    if (filetime_.next()) {
+    if (filetime_.next())
+    {
         return true;
     }
 
     tids_.pop_back();
-    if (tids_.size()) {
+    if (tids_.size())
+    {
         // There are some TIDs to check left.
         return true;
     }
@@ -76,23 +85,27 @@ bool BruteforceRange::forward() {
     return false;
 }
 
-BruteforceRange::BruteforceRange( uint32_t pid, std::vector<uint32_t> tids, BruteforceParam<uint32_t> gettickcount,
-        BruteforceParam<uint64_t> filetime, BruteforceParam<uint64_t> perfcounter)
-    :pid_(pid), tids_(tids), gettickcount_(gettickcount), filetime_(filetime), perfcounter_(perfcounter), perfcounter_xor_(0, 0),
-    tried_(0) { // hardcoded perfcount_diff
-        keyspace_ = tids_.size() * filetime_.keyspace() * perfcounter_.keyspace();
-        start_when_ = 0;
-        done_when_ = keyspace_;
-        perfcounter_xor_set();
-    }
+BruteforceRange::BruteforceRange(uint32_t pid, std::vector<uint32_t> tids, BruteforceParam<uint32_t> gettickcount,
+                                 BruteforceParam<uint64_t> filetime, BruteforceParam<uint64_t> perfcounter)
+    : pid_(pid), tids_(tids), gettickcount_(gettickcount), filetime_(filetime), perfcounter_(perfcounter), perfcounter_xor_(0, 0),
+      tried_(0)
+{ // hardcoded perfcount_diff
+    keyspace_ = tids_.size() * filetime_.keyspace() * perfcounter_.keyspace();
+    start_when_ = 0;
+    done_when_ = keyspace_;
+    perfcounter_xor_set();
+}
 
 // Returns false if the range is done, otherwise sets new key in packet.
-bool BruteforceRange::next(Packet target, PacketStatus *status) {
-    while (tried_ < start_when_) {
+bool BruteforceRange::next(Packet target, PacketStatus *status)
+{
+    while (tried_ < start_when_)
+    {
         forward();
     }
 
-    if (!forward() || tried_ > done_when_) {
+    if (!forward() || tried_ > done_when_)
+    {
         *status = PacketStatus::Done;
         return false;
     }
@@ -121,33 +134,59 @@ uint64_t BruteforceRange::current() const { return tried_; }
 // How many keys are there to try?
 uint64_t BruteforceRange::keyspace() const { return keyspace_; }
 
-double BruteforceRange::progress() const { 
+// When are we going to stop trying? (The user can ask to not try the whole keyspace)
+uint64_t BruteforceRange::done_when() const { return done_when_; }
+
+double BruteforceRange::progress() const
+{
     uint64_t done = tried_ - start_when_;
     return static_cast<double>(done) / (done_when_ - start_when_ + 1);
 }
 
-
-BruteforceRange BruteforceRange::parse(std::string path) {
+BruteforceRange BruteforceRange::parse(std::string path)
+{
     std::ifstream i(path);
+    if (!i.is_open())
+    {
+        std::cout << "Failed to open file: " << path << std::endl;
+        // Handle the error, maybe throw an exception or return a default object
+    }
+
     json j;
     i >> j;
+    std::cout << "Successfully read JSON from file: " << path << std::endl;
 
     uint32_t pid = j["pid"];
+    std::cout << "Parsed PID: " << pid << std::endl;
+
     std::vector<uint32_t> tids = j["tid"];
+    std::cout << "Parsed TIDs count: " << tids.size() << std::endl;
 
     json g = j["gettickcount"];
     json p = j["perfcounter"];
     json f = j["filetime"];
 
+    std::cout << "Initializing gettickcount with min: " << g["min"] << ", max: " << g["max"] << ", step: " << g["step"] << std::endl;
     BruteforceParam<uint32_t> gettickcount(g["min"], g["max"], g["step"]);
+
+    std::cout << "Initializing filetime with min: " << f["min"] << ", max: " << f["max"] << ", step: " << f["step"] << std::endl;
     BruteforceParam<uint64_t> filetime(f["min"], f["max"], f["step"]);
+
+    std::cout << "Initializing perfcounter with min: " << p["min"] << ", max: " << p["max"] << ", step: " << p["step"] << std::endl;
     BruteforceParam<uint64_t> perfcounter(p["min"], p["max"], p["step"]);
 
+    std::cout << "Finished parsing parameters from JSON." << std::endl;
     return BruteforceRange(pid, tids, gettickcount, filetime, perfcounter);
 }
 
-void BruteforceRange::limits(uint64_t start, uint64_t end) {
+void BruteforceRange::limits(uint64_t start, uint64_t end)
+{
     // TODO do it in a more optimal way
     start_when_ = start;
-    done_when_ = end;
+
+    if (end != -1)
+    {
+        done_when_ = end;
+    }
+    std::cout << "Will stop once key is found or state reaches " << done_when_ << "\n";
 }

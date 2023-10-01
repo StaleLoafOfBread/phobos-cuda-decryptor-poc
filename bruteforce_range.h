@@ -8,7 +8,8 @@
 #include <unordered_set>
 #include <cassert>
 
-enum class PacketStatus : uint32_t {
+enum class PacketStatus : uint32_t
+{
     InProgress = 1,
     Done = 2,
 };
@@ -30,14 +31,16 @@ const int BATCH_SIZE = 16 * 1024 * 1024;
 const uint64_t MAX_TICKS_DIFF = 1000;
 
 template <typename T>
-class BruteforceParam {
+class BruteforceParam
+{
     T min_;
     T max_;
     T current_;
     T step_;
 
 public:
-    BruteforceParam(T min, T max, T step=1) :min_(min), max_(max), current_(min), step_(step) {
+    BruteforceParam(T min, T max, T step = 1) : min_(min), max_(max), current_(min), step_(step)
+    {
         assert(step != 0);
         assert(min <= max);
         assert((max - min) % step == 0);
@@ -52,8 +55,10 @@ public:
     T keyspace() const { return (max_ - min_ + step_) / step_; }
 
     // Increases current. value. Returns false on overflow.
-    bool next() {
-        if (current_ < max_) {
+    bool next()
+    {
+        if (current_ < max_)
+        {
             current_ += step_;
             return true;
         }
@@ -62,7 +67,8 @@ public:
     }
 };
 
-class BruteforceRange {
+class BruteforceRange
+{
     // For work progress calculation
     uint32_t tried_;
     uint32_t keyspace_;
@@ -71,7 +77,7 @@ class BruteforceRange {
 
     std::vector<uint32_t> tids_;
 
-    uint64_t start_when_;  // start bruting at this chunk
+    uint64_t start_when_; // start bruting at this chunk
     uint64_t done_when_;  // stop bruting at this chunk
 
     BruteforceParam<uint32_t> gettickcount_;
@@ -85,8 +91,8 @@ class BruteforceRange {
     bool forward();
 
 public:
-    BruteforceRange( uint32_t pid, std::vector<uint32_t> tids, BruteforceParam<uint32_t> gettickcount,
-            BruteforceParam<uint64_t> filetime, BruteforceParam<uint64_t> perfcounter);
+    BruteforceRange(uint32_t pid, std::vector<uint32_t> tids, BruteforceParam<uint32_t> gettickcount,
+                    BruteforceParam<uint64_t> filetime, BruteforceParam<uint64_t> perfcounter);
 
     // Returns false if the range is done, otherwise sets new key in packet.
     bool next(Packet target, PacketStatus *status);
@@ -96,6 +102,9 @@ public:
 
     // How many keys are there to try?
     uint64_t keyspace() const;
+
+    // When are we going to stop trying? (The user can ask to not try the whole keyspace)
+    uint64_t done_when() const;
 
     double progress() const;
 

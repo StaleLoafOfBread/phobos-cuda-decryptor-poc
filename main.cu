@@ -249,7 +249,8 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Record the start time to measure the overall execution time.
     auto gt1 = std::chrono::high_resolution_clock::now();
-    std::cout << "Okay, let's crack some keys!\n";
+    std::cout << "\nOkay, let's crack some keys!\n";
+    std::cout << "Total keyspace: " << range->keyspace() << "\n\n";
 
     // Define data structures for packets and ciphertext on both CPU and GPU.
     Packets packets_gpu, packets_cpu;
@@ -290,7 +291,7 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
     {
         // Calculate the percentage of progress and display the current state.
         float percent = range->progress() * 100.0;
-        std::cout << "\nState: " << range->current() << " (" << percent << "%)\n";
+        std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
 
         // Record the start time for measuring the duration of each batch.
         auto t1 = std::chrono::high_resolution_clock::now();
