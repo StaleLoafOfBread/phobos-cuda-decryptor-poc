@@ -420,6 +420,9 @@ void showConfig()
     std::cout << "Usage Config:" << std::endl;
     std::cout << "BATCH_SIZE=" << BATCH_SIZE << std::endl;
 
+    // TODO: Include more aspects of the program to get a more accurate estimate
+    std::cout << "Estimated GPU Memory use (actual will be higher): " << ((BATCH_SIZE * sizeof(Packet)) / (1024.0 * 1024.0 * 1024.0)) << "GiB\n";
+
     const char *CUDA_VISIBLE_DEVICES = std::getenv("CUDA_VISIBLE_DEVICES");
     std::cout << "CUDA_VISIBLE_DEVICES=";
     if (CUDA_VISIBLE_DEVICES != nullptr)
