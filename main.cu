@@ -268,16 +268,21 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     // Allocate memory for packet data on CPU and GPU.
     std::cout << "Allocating memory for packet data on CPU and GPU\n";
     cudaMallocHost(&packets_cpu.data, BATCH_SIZE * sizeof(Packet));
+    print_cuda_errors();
     cudaMalloc(&packets_gpu.data, BATCH_SIZE * sizeof(Packet));
+    print_cuda_errors();
 
     // Allocate memory for packet statuses on CPU and GPU.
     std::cout << "Allocating memory for packet statuses on CPU and GPU\n";
     cudaMallocHost(&packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
+    print_cuda_errors();
     cudaMalloc(&packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
+    print_cuda_errors();
 
     // Allocate memory for ciphertext on GPU.
     std::cout << "Allocating memory for ciphertext on GPU\n";
     cudaMalloc(&ciphertext_gpu, 16);
+    print_cuda_errors();
 
     // Initialise all packets to the 'Done' state.
     std::cout << "Initializing all packets\n";
@@ -294,11 +299,14 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     // Copy packet data and statuses from CPU to GPU.
     std::cout << "Copying packet data and statuses from CPU to GPU\n";
     cudaMemcpy(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
+    print_cuda_errors();
     cudaMemcpy(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
+    print_cuda_errors();
 
     // Copy the ciphertext from the PhobosInstance from CPU to GPU.
     std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n";
     cudaMemcpy(ciphertext_gpu, phobos.ciphertext().data(), 16, cudaMemcpyHostToDevice);
+    print_cuda_errors();
 
     // Delcare outside the loop to prevent reinitialization
     // Compiler might be doing this under the hood but just in case...
