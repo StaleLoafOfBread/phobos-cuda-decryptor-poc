@@ -393,7 +393,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     }
 }
 
-void showCudaDeviceProp(int device_idx = 0)
+void showCudaDeviceProp(int device_idx)
 {
     cudaDeviceProp deviceProp;
     cudaError_t err = cudaGetDeviceProperties(&deviceProp, device_idx);
@@ -445,7 +445,7 @@ void showConfig()
 
     std::cout << "Number of CUDA GPUs detected: " << nDevices << std::endl;
 
-    showCudaDeviceProp();
+    showCudaDeviceProp(0);
 }
 
 int main(int argc, char *argv[])
