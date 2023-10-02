@@ -373,11 +373,11 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "\nTotal time: " << ((float)duration / 1000000) << std::endl;
 
     // Free allocated memory on CPU and GPU.
-    cudaFree(packets_cpu.data);
+    cudaFreeHost(packets_cpu.data);
     print_cuda_errors();
     cudaFree(packets_gpu.data);
     print_cuda_errors();
-    cudaFree(packets_cpu.statuses);
+    cudaFreeHost(packets_cpu.statuses);
     print_cuda_errors();
     cudaFree(packets_gpu.statuses);
     print_cuda_errors();
