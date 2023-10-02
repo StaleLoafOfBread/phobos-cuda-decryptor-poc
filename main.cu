@@ -283,6 +283,11 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "Initializing all packets\n";
     for (int x = 0; x < BATCH_SIZE; x++)
     {
+        // Original authors initialized as PacketStatus::Done
+        // Tested as PacketStatus::InProgress worked as well
+        // Hypothetically PacketStatus::Done would skip the first packets
+        // Though no testing has been performed to verify that
+        // Leaving as PacketStatus::Done for now
         packets_cpu.statuses[x] = PacketStatus::Done;
     }
 
