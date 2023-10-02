@@ -381,6 +381,16 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     print_cuda_errors();
     cudaFree(packets_gpu.statuses);
     print_cuda_errors();
+
+    // Return based on if the key was found
+    if (found_key)
+    {
+        return 0;
+    }
+    else
+    {
+        return 404;
+    }
 }
 
 void showCudaDeviceProp(int device_idx = 0)
