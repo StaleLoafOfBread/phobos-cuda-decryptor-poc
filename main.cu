@@ -306,6 +306,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     auto t1 = std::chrono::high_resolution_clock::now();
     auto t2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+    bool found_key = false;
 
     // Enter an infinite loop for the brute-force attack.
     while (true)
@@ -339,6 +340,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
         if (find_needle(phobos, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
             std::cout << "Found needle\n";
+            found_key = true;
             break;
         }
 
@@ -461,8 +463,7 @@ int main(int argc, char *argv[])
         uint64_t end = std::strtoull(argv[6], &endx, 10);
         range.limits(start, end);
         PhobosInstance phobos = PhobosInstance::load(argv[3], argv[4]);
-        brute(phobos, &range);
-        return;
+        return brute(phobos, &range);
     }
 
     if (std::string(argv[1]) == "show" && std::string(argv[2]) == "config")
