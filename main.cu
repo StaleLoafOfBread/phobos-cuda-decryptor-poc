@@ -244,7 +244,16 @@ bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses
     return !any_tasks_in_progress;
 }
 
-void brute(const PhobosInstance &phobos, BruteforceRange *range)
+void print_cuda_errors()
+{
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
+}
+
+int brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
 
     // Record the start time to measure the overall execution time.
@@ -306,18 +315,22 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
         // Start the SHA task on GPU.
         std::cout << "Starting the SHA task on GPU\n";
         sha_rounds<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses);
+        print_cuda_errors();
 
         // Start the AES task on GPU.
         std::cout << "Starting the AES task on GPU\n";
         aes_decrypt<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses, ciphertext_gpu);
+        print_cuda_errors();
 
         // Wait for CUDA tasks to complete and copy results back to CPU.
         std::cout << "Copying GPU results to CPU\n";
         cudaMemcpy(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost);
+        print_cuda_errors();
         cudaMemcpy(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost);
+        print_cuda_errors();
 
         // Perform CPU task: Check if the plaintext_cbc matches any packet.
-        std::cout << "Starting the CPU task to check for match\n";
+        std::cout << "Waiting for GPU tasks then starting the CPU task to check for match\n";
         if (find_needle(phobos, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
         {
             std::cout << "Found needle\n";
@@ -336,13 +349,9 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
 
         // Copy the next batch of tasks from CPU to GPU asynchronously.
         cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
+        print_cuda_errors();
         cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
-
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess)
-        {
-            printf("CUDA Error: %s\n", cudaGetErrorString(err));
-        }
+        print_cuda_errors();
 
         // Record the end time of the batch and calculate its duration.
         t2 = std::chrono::high_resolution_clock::now();
@@ -358,11 +367,13 @@ void brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Free allocated memory on CPU and GPU.
     cudaFree(packets_cpu.data);
+    print_cuda_errors();
     cudaFree(packets_gpu.data);
+    print_cuda_errors();
     cudaFree(packets_cpu.statuses);
+    print_cuda_errors();
     cudaFree(packets_gpu.statuses);
-
-    return;
+    print_cuda_errors();
 }
 
 void showCudaDeviceProp(int device_idx = 0)
@@ -437,6 +448,8 @@ int main(int argc, char *argv[])
 
     if (std::string(argv[1]) == "crack")
     {
+        showConfig();
+        std::cout << std::endl;
         BruteforceRange range = BruteforceRange::parse(argv[2]);
         char *endx;
         uint64_t start = std::strtoull(argv[5], &endx, 10);
@@ -444,7 +457,7 @@ int main(int argc, char *argv[])
         range.limits(start, end);
         PhobosInstance phobos = PhobosInstance::load(argv[3], argv[4]);
         brute(phobos, &range);
-        return 0;
+        return;
     }
 
     if (std::string(argv[1]) == "show" && std::string(argv[2]) == "config")
