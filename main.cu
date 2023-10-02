@@ -33,12 +33,17 @@ __device__ const uint8_t key_high[] = {
 __global__ void aes_decrypt(unsigned int n, Packet packets[], PacketStatus statuses[], uint8_t *ciphertext)
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // We spin up threads via blocks which have a specified number of threads each
+    // Sometimes we end up with more threads than we need
+    // because n is not evenly divisible by threads per block
+    // This exits the thread if its an extra thread
     if (thread_id >= n)
     {
         return;
     }
 
-    // do not decrypt unfinished packets
+    // Do not decrypt packets which have not yet finished having SHA ran against it
     if (statuses[thread_id] != PacketStatus::Done)
     {
         return;
@@ -63,12 +68,17 @@ __global__ void sha_rounds(unsigned int n, Packet packets[], PacketStatus status
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (statuses[thread_id] == PacketStatus::Done)
+    // We spin up threads via blocks which have a specified number of threads each
+    // Sometimes we end up with more threads than we need
+    // because n is not evenly divisible by threads per block
+    // This exits the thread if its an extra thread
+    if (thread_id >= n)
     {
         return;
     }
 
-    if (thread_id >= n)
+    // No need to run SHA against it if its already had it done and is waiting for AES
+    if (statuses[thread_id] == PacketStatus::Done)
     {
         return;
     }
@@ -253,6 +263,20 @@ void print_cuda_errors()
     }
 }
 
+int getMaxThreadsPerBlock(int device_id)
+{
+    cudaDeviceProp deviceProp;
+    cudaError_t err = cudaGetDeviceProperties(&deviceProp, device_id);
+
+    if (err != cudaSuccess)
+    {
+        std::cerr << "Error fetching device properties: " << cudaGetErrorString(err) << std::endl;
+        return -1;
+    }
+
+    return deviceProp.maxThreadsPerBlock;
+}
+
 int brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
 
@@ -288,12 +312,10 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "Initializing all packets\n";
     for (int x = 0; x < BATCH_SIZE; x++)
     {
-        // Original authors initialized as PacketStatus::Done
-        // Tested as PacketStatus::InProgress worked as well
-        // Hypothetically PacketStatus::Done would skip the first packets
-        // Though no testing has been performed to verify that
-        // Leaving as PacketStatus::Done for now
-        packets_cpu.statuses[x] = PacketStatus::Done;
+        // InProgress indicates its not ready for AES
+        // and is either being processed by the SHA or is ready for it
+        // If we initialize as Done then packets get immediately rotated and skipped
+        packets_cpu.statuses[x] = PacketStatus::InProgress;
     }
 
     // Copy packet data and statuses from CPU to GPU.
@@ -304,7 +326,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     print_cuda_errors();
 
     // Copy the ciphertext from the PhobosInstance from CPU to GPU.
-    std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n";
+    std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n\n";
     cudaMemcpy(ciphertext_gpu, phobos.ciphertext().data(), 16, cudaMemcpyHostToDevice);
     print_cuda_errors();
 
@@ -315,6 +337,22 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     auto t2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
     bool found_key = false;
+
+    // Define the blocks/threads for the CUDA/Device/Kernal/GPU functions
+    // AKA the Launch Configuration
+    const int threadsPerBlockSHA = getMaxThreadsPerBlock(0);                             // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+    const int numBlocksSHA = (BATCH_SIZE + threadsPerBlockSHA - 1) / threadsPerBlockSHA; // This rounds up to ensure all elements are processed.
+    std::cout << "SHA Total Blocks:      " << numBlocksSHA << "\n";
+    std::cout << "SHA Threads per block: " << threadsPerBlockSHA << "\n";
+    std::cout << "SHA Total Threads:     " << (threadsPerBlockSHA * numBlocksSHA) << "\n";
+
+    // Reduce the AES threads per block as we will otherwise try to aquire too many resources
+    // The division by 8 was empirically and there is likley optimization being missed
+    const int threadsPerBlockAES = threadsPerBlockSHA / 8;
+    const int numBlocksAES = numBlocksSHA * 8;
+    std::cout << "AES Total Blocks:      " << numBlocksAES << "\n";
+    std::cout << "AES Threads per block: " << threadsPerBlockAES << "\n";
+    std::cout << "AES Total Threads:     " << (threadsPerBlockAES * numBlocksAES) << "\n";
 
     // Enter an infinite loop for the brute-force attack.
     while (true)
@@ -328,12 +366,12 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
         // Start the SHA task on GPU.
         std::cout << "Starting the SHA task on GPU\n";
-        sha_rounds<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses);
+        sha_rounds<<<numBlocksSHA, threadsPerBlockSHA>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses);
         print_cuda_errors();
 
         // Start the AES task on GPU.
         std::cout << "Starting the AES task on GPU\n";
-        aes_decrypt<<<16 * 2048, 512>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses, ciphertext_gpu);
+        aes_decrypt<<<numBlocksAES, threadsPerBlockAES>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses, ciphertext_gpu);
         print_cuda_errors();
 
         // Wait for CUDA tasks to complete and copy results back to CPU.
