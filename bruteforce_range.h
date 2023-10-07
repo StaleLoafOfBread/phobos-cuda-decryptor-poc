@@ -8,10 +8,13 @@
 #include <unordered_set>
 #include <cassert>
 
-enum class PacketStatus : uint32_t
+enum class PacketStatus : uint8_t
 {
-    InProgress = 1,
-    Done = 2,
+    ReadyForSHA,
+    ReadyForAES,
+    ReadyForValidation,
+    ReadyForRotation,
+    KeySpaceExhausted
 };
 
 typedef unsigned char Packet[32];
@@ -25,10 +28,11 @@ struct Packets
 using Block16 = std::array<uint8_t, 16>;
 
 const int SHA_ROUNDS = 64;
-const int BATCH_SIZE = 16 * 1024 * 1024;
+
+const int BATCH_SIZE = 16 * 1024 * 1024; // How many keys to try concurrently
 // const unsigned int PACKETS_SIZE = BATCH_SIZE * sizeof(Packet);
 
-const uint64_t MAX_TICKS_DIFF = 1000;
+const uint64_t MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF = 1000;
 
 template <typename T>
 class BruteforceParam
@@ -54,7 +58,12 @@ public:
 
     T keyspace() const { return (max_ - min_ + step_) / step_; }
 
-    // Increases current. value. Returns false on overflow.
+    /**
+     * Increases current value. Returns false on overflow.
+     * Resets to min on overflow
+     *
+     * @return true when able to move to next iteration. False on overflow.
+     */
     bool next()
     {
         if (current_ < max_)
@@ -70,15 +79,17 @@ public:
 class BruteforceRange
 {
     // For work progress calculation
-    uint32_t tried_;
-    uint32_t keyspace_;
+    uint32_t total_keys_tried_;   // How many keys have been tried or more accurately, how many have been returned for another function to try
+    uint32_t cur_keyspace_index_; // What key of the current keyspace are we on. This is not the key itself. Starts at 0.
+    uint32_t keyspace_;           // How many total keys there are to check not counting percounter_xor because I couldn't figure out that math and its better use of my time to optimize than make the progress bar more precise
 
     uint32_t pid_;
 
     std::vector<uint32_t> tids_;
 
-    uint64_t start_when_; // start bruting at this chunk
-    uint64_t done_when_;  // stop bruting at this chunk
+    uint64_t start_when_; // start bruting at this chunk. To start at the begining set to 0
+    uint64_t done_when_;  // stop bruting at this chunk. Remember that this is array based so we start at 0 and end at the total count minus 1 (or whatever the user requested)
+    bool no_more_keys_;   // Will be set to true once we exhausted all the keys
 
     BruteforceParam<uint32_t> gettickcount_;
     BruteforceParam<uint64_t> filetime_;
@@ -94,19 +105,17 @@ public:
     BruteforceRange(uint32_t pid, std::vector<uint32_t> tids, BruteforceParam<uint32_t> gettickcount,
                     BruteforceParam<uint64_t> filetime, BruteforceParam<uint64_t> perfcounter);
 
-    // Returns false if the range is done, otherwise sets new key in packet.
-    bool next(Packet target, PacketStatus *status);
+    bool next(Packet target, PacketStatus *status, int thread_id);
 
-    // How many keys were tried?
     uint64_t current() const;
 
-    // How many keys are there to try?
     uint64_t keyspace() const;
 
-    // When are we going to stop trying? (The user can ask to not try the whole keyspace)
     uint64_t done_when() const;
 
-    double progress() const;
+    uint64_t total_keys_tried() const;
+
+    float progress() const;
 
     static BruteforceRange parse(std::string path);
 
