@@ -13,7 +13,13 @@
 #include <ios>
 #include <unordered_map>
 
-__device__ const uint8_t key_high[] = {
+// Device Constant memory should be faster to access but
+// 1) Is read only
+// 2) Is only 64KB
+__constant__ int BATCH_SIZE_GPU = BATCH_SIZE;
+__constant__ uint8_t ciphertext_gpu[16];
+__constant__ uint8_t plaintext_cbc_gpu[16];
+__constant__ const uint8_t key_high[] = {
     0x0d,
     0xdb,
     0x95,
@@ -32,7 +38,7 @@ __device__ const uint8_t key_high[] = {
     0x12,
 };
 
-__device__ void aes_decrypt(unsigned int n, Packet packets[], PacketStatus statuses[], uint8_t *ciphertext)
+__device__ void aes_decrypt(Packet packets[], PacketStatus statuses[])
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -40,7 +46,7 @@ __device__ void aes_decrypt(unsigned int n, Packet packets[], PacketStatus statu
     // Sometimes we end up with more threads than we need
     // because n is not evenly divisible by threads per block
     // This exits the thread if its an extra thread
-    if (thread_id >= n)
+    if (thread_id >= BATCH_SIZE_GPU)
     {
         return;
     }
@@ -57,7 +63,7 @@ __device__ void aes_decrypt(unsigned int n, Packet packets[], PacketStatus statu
     mycpy16((uint32_t *)(key + 16), (uint32_t *)key_high);
 
     uint8_t block[16];
-    mycpy16((uint32_t *)block, (uint32_t *)ciphertext);
+    mycpy16((uint32_t *)block, (uint32_t *)ciphertext_gpu);
 
     aes256_context ctx;
     aes256_init(&ctx, key);
@@ -68,7 +74,7 @@ __device__ void aes_decrypt(unsigned int n, Packet packets[], PacketStatus statu
     statuses[thread_id] = PacketStatus::ReadyForValidation;
 }
 
-__device__ void sha_rounds(unsigned int n, Packet packets[], PacketStatus statuses[])
+__device__ void sha_rounds(Packet packets[], PacketStatus statuses[])
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -76,7 +82,7 @@ __device__ void sha_rounds(unsigned int n, Packet packets[], PacketStatus status
     // Sometimes we end up with more threads than we need
     // because n is not evenly divisible by threads per block
     // This exits the thread if its an extra thread
-    if (thread_id >= n)
+    if (thread_id >= BATCH_SIZE_GPU)
     {
         return;
     }
@@ -121,7 +127,7 @@ __device__ void sha_rounds(unsigned int n, Packet packets[], PacketStatus status
     }
 }
 
-__global__ void process_packet(unsigned int n, Packet packets[], PacketStatus statuses[], uint8_t *ciphertext, uint8_t *plaintext_cbc, bool *found_key)
+__global__ void process_packet(Packet packets[], PacketStatus statuses[], bool *found_key)
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -129,13 +135,13 @@ __global__ void process_packet(unsigned int n, Packet packets[], PacketStatus st
     // Sometimes we end up with more threads than we need
     // because n is not evenly divisible by threads per block
     // This exits the thread if its an extra thread
-    if (thread_id >= n)
+    if (thread_id >= BATCH_SIZE_GPU)
     {
         return;
     }
 
-    sha_rounds(n, packets, statuses);
-    aes_decrypt(n, packets, statuses, ciphertext);
+    sha_rounds(packets, statuses);
+    aes_decrypt(packets, statuses);
 
     // Check if we have found the key
     // This will set the found_key to true if appropiate
@@ -144,7 +150,7 @@ __global__ void process_packet(unsigned int n, Packet packets[], PacketStatus st
         // Actually perform the validation
         for (int i = 0; i < 16; ++i)
         {
-            if (packets[thread_id][i] != plaintext_cbc[i])
+            if (packets[thread_id][i] != plaintext_cbc_gpu[i])
             {
                 // This is not a match
                 statuses[thread_id] = PacketStatus::ReadyForRotation;
@@ -365,9 +371,8 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "\nOkay, let's crack some keys!\n";
     std::cout << "Total keyspace: " << range->keyspace() << "\n\n";
 
-    // Define data structures for packets and ciphertext on both CPU and GPU.
+    // Define data structures for packets on both CPU and GPU.
     Packets packets_gpu, packets_cpu;
-    uint8_t *ciphertext_gpu;
 
     // Allocate memory for packet data on CPU and GPU.
     std::cout << "Allocating memory for packet data on CPU and GPU\n";
@@ -395,28 +400,8 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
         return 99;
     }
 
-    // Allocate memory for ciphertext on GPU.
-    std::cout << "Allocating memory for ciphertext on GPU\n";
-    cudaMalloc(&ciphertext_gpu, 16);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-
-    // Allocate memory on the GPU for plaintext_cbc
-    uint8_t *plaintext_cbc_gpu;
-    cudaMalloc(&plaintext_cbc_gpu, sizeof(Block16));
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-
     // Copy plaintext_cbc data to GPU
-    cudaMemcpy(plaintext_cbc_gpu, phobos.plaintext_cbc().data(), sizeof(Block16), cudaMemcpyHostToDevice);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
+    cudaMemcpyToSymbol(plaintext_cbc_gpu, phobos.plaintext_cbc().data(), sizeof(Block16));
 
     // Initialise all packets
     std::cout << "Initializing all packet statuses\n";
@@ -435,11 +420,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Copy the ciphertext from the PhobosInstance from CPU to GPU.
     std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n\n";
-    cudaMemcpy(ciphertext_gpu, phobos.ciphertext().data(), 16, cudaMemcpyHostToDevice);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
+    cudaMemcpyToSymbol(ciphertext_gpu, phobos.ciphertext().data(), sizeof(Block16));
 
     // Delcare outside the loop to prevent reinitialization
     // Compiler might be doing this under the hood but just in case...
@@ -489,15 +470,14 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
         // Process the packets
         std::cout << "Processing batch on GPU\n";
-        process_packet<<<numBlocks, threadsPerBlock>>>(BATCH_SIZE, packets_gpu.data, packets_gpu.statuses, ciphertext_gpu, plaintext_cbc_gpu, found_key_gpu);
+        process_packet<<<numBlocks, threadsPerBlock>>>(packets_gpu.data, packets_gpu.statuses, found_key_gpu);
         if (print_cuda_errors())
         {
             return 99;
         }
-        cudaDeviceSynchronize();
 
         std::cout << "Copying GPU results to CPU for found flag\n";
-        cudaMemcpy(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
+        cudaMemcpyAsync(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
         if (print_cuda_errors())
         {
             return 99;
@@ -511,16 +491,17 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
         // Copy the results from GPU to CPU
         std::cout << "Copying GPU packets and statuses to CPU so we can rotate them\n";
-        cudaMemcpy(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost); // If I remove this, it doesnt rotate anymore
+        cudaMemcpyAsync(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost); // If I remove this, it doesnt rotate anymore
         if (print_cuda_errors())
         {
             return 99;
         }
-        cudaMemcpy(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost); // I always leave this in
+        cudaMemcpyAsync(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost); // I always leave this in
         if (print_cuda_errors())
         {
             return 99;
         }
+        cudaDeviceSynchronize();
 
         // Rotate keys and check if the full range is scanned.
         std::cout << "Rotating keys\n";
@@ -532,16 +513,17 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
         // Copy the next batch of tasks from CPU to GPU asynchronously.
         std::cout << "Copying next batch to GPU!\n";
-        cudaMemcpy(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
         if (print_cuda_errors())
         {
             return 99;
         }
-        cudaMemcpy(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
         if (print_cuda_errors())
         {
             return 99;
         }
+        cudaDeviceSynchronize();
 
         // Record the end time of the batch and calculate its duration.
         t2 = std::chrono::high_resolution_clock::now();
