@@ -5,7 +5,7 @@
 #include <vector>
 #include <unordered_set>
 #include <cassert>
-#include "bruteforce_range.h"
+#include "bruteforce_range.cuh"
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;

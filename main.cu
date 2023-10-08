@@ -7,7 +7,7 @@
 #include <cassert>
 #include "sha256.cuh"
 #include "aes256.h"
-#include "bruteforce_range.h"
+#include "bruteforce_range.cuh"
 
 #include <iomanip>
 #include <ios>
