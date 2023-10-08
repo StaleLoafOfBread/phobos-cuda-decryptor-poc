@@ -14,7 +14,7 @@ enum class PacketStatus : uint8_t
     ReadyForAES,
     ReadyForValidation,
     ReadyForRotation,
-    KeySpaceExhausted
+    KeySpaceExhaustedOrKeyFound
 };
 
 typedef unsigned char Packet[32];
@@ -27,9 +27,22 @@ struct Packets
 
 using Block16 = std::array<uint8_t, 16>;
 
-const int SHA_ROUNDS = 64;
+// To mitigate the variance in how many sha rounds will be required for each key we limit the maxiumum number of times we perform SHA against it per GPU call.
+// Those that exceed the limit will continue being processed on the next call to the GPU
+// Otherwise, one key that requires 1,000,000 sha rounds will force the other threads to remain idle while it finishes
+// It will take on average 256 sha rounds, so a number lower than that was chosen, thus increasing the chance we have no idle threads
+// A number too low will increase how many times we need to transfer memory between the GPU and CPU, increasing total time
+const int MAX_SHA_ROUNDS_PER_GPU_CALL = 192;
 
-const int BATCH_SIZE = 16 * 1024 * 1024; // How many keys to try concurrently
+// How many bytes will we be using for each packet/key we attempt
+const int BYTES_PER_KEY = sizeof(Packet) + sizeof(PacketStatus);
+
+// How many Gigabytes (Gibibytes) should we consume
+const int TARGET_GB = 6;
+
+// How many packets/keys to process at once based off how many GiB we
+const uint64_t BATCH_SIZE = static_cast<uint64_t>(TARGET_GB) * 1024 * 1024 * 1024 / BYTES_PER_KEY;
+
 // const unsigned int PACKETS_SIZE = BATCH_SIZE * sizeof(Packet);
 
 const uint64_t MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF = 1000;

@@ -146,14 +146,14 @@ bool BruteforceRange::next(Packet target, PacketStatus *status, int thread_id)
     // If the user requested we stop early do so
     if (cur_keyspace_index_ > done_when_)
     {
-        *status = PacketStatus::KeySpaceExhausted;
+        *status = PacketStatus::KeySpaceExhaustedOrKeyFound;
         return false;
     }
 
     // If we ran out of keys to try
     if (!forward())
     {
-        *status = PacketStatus::KeySpaceExhausted;
+        *status = PacketStatus::KeySpaceExhaustedOrKeyFound;
         return false;
     }
 

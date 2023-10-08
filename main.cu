@@ -16,7 +16,7 @@
 // Device Constant memory should be faster to access but
 // 1) Is read only
 // 2) Is only 64KB
-__constant__ int BATCH_SIZE_GPU = BATCH_SIZE;
+__constant__ uint64_t BATCH_SIZE_GPU = BATCH_SIZE;
 __constant__ uint8_t ciphertext_gpu[16];
 __constant__ uint8_t plaintext_cbc_gpu[16];
 __constant__ const uint8_t key_high[] = {
@@ -74,7 +74,7 @@ __device__ void aes_decrypt(Packet packets[], PacketStatus statuses[])
     statuses[thread_id] = PacketStatus::ReadyForValidation;
 }
 
-__device__ void sha_rounds(Packet packets[], PacketStatus statuses[])
+__device__ void sha_rounds(Packet packets[], PacketStatus statuses[], bool *found_key)
 {
     int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -104,7 +104,7 @@ __device__ void sha_rounds(Packet packets[], PacketStatus statuses[])
 
     // TODO: Check if the first round is always applied or not
     bool is_done;
-    for (int round = 0; round < SHA_ROUNDS; round++)
+    for (int round = 0; round < MAX_SHA_ROUNDS_PER_GPU_CALL; round++)
     {
         is_done = (data[0] & 0xFF000000) == 0 && round != 0;
         sha256_transform(data);
@@ -112,6 +112,12 @@ __device__ void sha_rounds(Packet packets[], PacketStatus statuses[])
         if (is_done)
         {
             break;
+        }
+
+        // Exit early if the key was already found by another thread
+        if (*found_key)
+        {
+            return;
         }
     }
 
@@ -121,9 +127,12 @@ __device__ void sha_rounds(Packet packets[], PacketStatus statuses[])
 
     mycpy32((uint32_t *)packets[thread_id], data);
 
+    // Mark the packet as ready for AES if we have finished running the SHA256_transform against it
+    // Otherwise the status will remain as ReadyForSHA and we will pick up where we left off
     if (is_done)
     {
         statuses[thread_id] = PacketStatus::ReadyForAES;
+        return;
     }
 }
 
@@ -140,35 +149,62 @@ __global__ void process_packet(Packet packets[], PacketStatus statuses[], bool *
         return;
     }
 
-    sha_rounds(packets, statuses);
+    sha_rounds(packets, statuses, found_key);
+
+    // Exit early if the key was already found by another thread while we were performing the sha_rounds
+    if (*found_key)
+    {
+        return;
+    }
+
     aes_decrypt(packets, statuses);
 
+    // Exit early if the key was already found by another thread while we were performing the aws_decryption
+    if (*found_key)
+    {
+        return;
+    }
     // Check if we have found the key
     // This will set the found_key to true if appropiate
     if (statuses[thread_id] == PacketStatus::ReadyForValidation)
     {
         // Actually perform the validation
-        for (int i = 0; i < 16; ++i)
+        if (
+            packets[thread_id][0] != plaintext_cbc_gpu[0] ||
+            packets[thread_id][1] != plaintext_cbc_gpu[1] ||
+            packets[thread_id][2] != plaintext_cbc_gpu[2] ||
+            packets[thread_id][3] != plaintext_cbc_gpu[3] ||
+            packets[thread_id][4] != plaintext_cbc_gpu[4] ||
+            packets[thread_id][5] != plaintext_cbc_gpu[5] ||
+            packets[thread_id][6] != plaintext_cbc_gpu[6] ||
+            packets[thread_id][7] != plaintext_cbc_gpu[7] ||
+            packets[thread_id][8] != plaintext_cbc_gpu[8] ||
+            packets[thread_id][9] != plaintext_cbc_gpu[9] ||
+            packets[thread_id][10] != plaintext_cbc_gpu[10] ||
+            packets[thread_id][11] != plaintext_cbc_gpu[11] ||
+            packets[thread_id][12] != plaintext_cbc_gpu[12] ||
+            packets[thread_id][13] != plaintext_cbc_gpu[13] ||
+            packets[thread_id][14] != plaintext_cbc_gpu[14] ||
+            packets[thread_id][15] != plaintext_cbc_gpu[15])
         {
-            if (packets[thread_id][i] != plaintext_cbc_gpu[i])
+            statuses[thread_id] = PacketStatus::ReadyForRotation;
+        }
+        else
+        {
+            // If we get this far that means we found it!
+            *found_key = true;
+            printf("Thread %d set found_key value: %d\n", thread_id, *found_key);
+            printf("plaintext_cbc: ");
+            for (int i = 0; i < 32; ++i)
             {
-                // This is not a match
-                statuses[thread_id] = PacketStatus::ReadyForRotation;
-                return;
+                printf("%02x", packets[thread_id][i]);
             }
+            printf("\n");
+            statuses[thread_id] = PacketStatus::KeySpaceExhaustedOrKeyFound;
+            return;
         }
-
-        // If we get this far that means we found it!
-        *found_key = true;
-        printf("Thread %d set found_key value: %d\n", thread_id, *found_key);
-        printf("plaintext_cbc: ");
-        for (int i = 0; i < 32; ++i)
-        {
-            printf("%02x", packets[thread_id][i]);
-        }
-        printf("\n");
-        return;
     }
+
     return;
 }
 
@@ -290,7 +326,7 @@ bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses
         if (statuses[i] != PacketStatus::ReadyForRotation)
         {
             // There is at least one packet still being processed
-            if (statuses[i] != PacketStatus::KeySpaceExhausted)
+            if (statuses[i] != PacketStatus::KeySpaceExhaustedOrKeyFound)
             {
                 any_tasks_in_progress = true;
             }
@@ -303,7 +339,7 @@ bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses
         if (!range->next(packets[i], &statuses[i], i))
         {
             // There are no more possible combinations to try but there could still be some combinations being processed
-            statuses[i] = PacketStatus::KeySpaceExhausted;
+            statuses[i] = PacketStatus::KeySpaceExhaustedOrKeyFound;
 
             // Process next packet
             // If we return here we won't evaluate the packets that have yet to finish being processed
@@ -344,7 +380,7 @@ void countStatuses(const PacketStatus statuses[], const size_t n)
     status_counts[PacketStatus::ReadyForAES] = 0;
     status_counts[PacketStatus::ReadyForValidation] = 0;
     status_counts[PacketStatus::ReadyForRotation] = 0;
-    status_counts[PacketStatus::KeySpaceExhausted] = 0;
+    status_counts[PacketStatus::KeySpaceExhaustedOrKeyFound] = 0;
     // ... initialize counts for any additional statuses to 0 ...
 
     // Count occurrences of each status.
@@ -355,17 +391,16 @@ void countStatuses(const PacketStatus statuses[], const size_t n)
 
     // Output the counts.
     std::cout << "Status counts:\n";
-    std::cout << "ReadyForSHA:         " << status_counts[PacketStatus::ReadyForSHA] << "\n";
-    std::cout << "ReadyForAES:         " << status_counts[PacketStatus::ReadyForAES] << "\n";
-    std::cout << "ReadyForValidation:  " << status_counts[PacketStatus::ReadyForValidation] << "\n";
-    std::cout << "ReadyForRotation:    " << status_counts[PacketStatus::ReadyForRotation] << "\n";
-    std::cout << "KeySpaceExhausted:   " << status_counts[PacketStatus::KeySpaceExhausted] << "\n";
+    std::cout << "ReadyForSHA:                 " << status_counts[PacketStatus::ReadyForSHA] << "\n";
+    std::cout << "ReadyForAES:                 " << status_counts[PacketStatus::ReadyForAES] << "\n";
+    std::cout << "ReadyForValidation:          " << status_counts[PacketStatus::ReadyForValidation] << "\n";
+    std::cout << "ReadyForRotation:            " << status_counts[PacketStatus::ReadyForRotation] << "\n";
+    std::cout << "KeySpaceExhaustedOrKeyFound: " << status_counts[PacketStatus::KeySpaceExhaustedOrKeyFound] << "\n";
     // ... output counts for any additional statuses ...
 }
 
 int brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
-
     // Record the start time to measure the overall execution time.
     auto gt1 = std::chrono::high_resolution_clock::now();
     std::cout << "\nOkay, let's crack some keys!\n";
@@ -407,7 +442,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "Initializing all packet statuses\n";
     for (int x = 0; x < BATCH_SIZE; x++)
     {
-        packets_cpu.statuses[x] = PacketStatus::ReadyForSHA;
+        packets_cpu.statuses[x] = PacketStatus::ReadyForRotation;
     }
 
     // Copy packet data and statuses from CPU to GPU.
@@ -445,31 +480,47 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Define the blocks/threads for the CUDA/Device/Kernal/GPU functions
     // AKA the Launch Configuration
-    const int adjustment_for_resource_error = 2;                                                                  // If we don't adjust we get an error "too many resources requested for launch". Really not sure why but reducing threads per block fixes it so thats the bandaid for now as we want the threads to be dynamic based on BATCH_SIZE to ensure there is a thread per packet
-    const int threadsPerBlock = getMaxThreadsPerBlock(0) / adjustment_for_resource_error;                         // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
-    const int numBlocks = ((BATCH_SIZE + threadsPerBlock - 1) / threadsPerBlock) * adjustment_for_resource_error; // This rounds up to ensure all elements are processed.
+    const float adjustment_for_resource_error = 1.75;                                            // If we don't adjust we get an error "too many resources requested for launch". Really not sure why but reducing threads per block fixes it so thats the bandaid for now as we want the threads to be dynamic based on BATCH_SIZE to ensure there is a thread per packet
+    const int threadsPerBlock = (float)getMaxThreadsPerBlock(0) / adjustment_for_resource_error; // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+    const int numBlocks = ((BATCH_SIZE + threadsPerBlock - 1) / threadsPerBlock);                // This rounds up to ensure all elements are processed.
     std::cout << "Total Blocks:      " << numBlocks << "\n";
     std::cout << "Threads per block: " << threadsPerBlock << "\n";
     std::cout << "Total Threads:     " << (threadsPerBlock * numBlocks) << "\n";
+    assert((threadsPerBlock * numBlocks) >= BATCH_SIZE); // Ensure that we always have enough threads for each packet we are working on
 
     // Calculate the percentage of progress and display the current state.
     percent = range->progress() * 100.0;
     std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
     std::cout << "Total Keys Tried: " << range->total_keys_tried() << "\n";
     std::cout << "You may see the program get stuck at a state/percentage. This is expected and due to it still processing some packets. The state increases as a new attempt is started, not when its finished.\n";
-    // Enter an infinite loop for the brute-force attack.
+
+    // Initalize all the packets with data before entering the loop
+    std::cout << "Initializing all the packets\n";
+    rotate_keys(range, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE);
+    cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
+    if (print_cuda_errors())
+    {
+        return 99;
+    }
+    cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
+    if (print_cuda_errors())
+    {
+        return 99;
+    }
+    cudaDeviceSynchronize();
+
+    // Start the brute-force attack
     while (true)
     {
+
+        // Record the start time for measuring the duration of each batch.
+        t1 = std::chrono::high_resolution_clock::now();
+
         // Calculate the percentage of progress and display the current state.
         percent = range->progress() * 100.0;
         std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
         std::cout << "Total Keys Tried/Currently Being Processed: " << range->total_keys_tried() << "\n";
 
-        // Record the start time for measuring the duration of each batch.
-        t1 = std::chrono::high_resolution_clock::now();
-
-        // Process the packets
-        std::cout << "Processing batch on GPU\n";
         process_packet<<<numBlocks, threadsPerBlock>>>(packets_gpu.data, packets_gpu.statuses, found_key_gpu);
         if (print_cuda_errors())
         {
@@ -477,7 +528,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
         }
 
         std::cout << "Copying GPU results to CPU for found flag\n";
-        cudaMemcpyAsync(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
         if (print_cuda_errors())
         {
             return 99;
@@ -490,13 +541,14 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
         }
 
         // Copy the results from GPU to CPU
+        // We need to copy the full data from the GPU as some SHA hashing may be incomplete and later we overwrite it when we rotate the keys so we neeed to the original value so that we don't change the value when we overwrite it
         std::cout << "Copying GPU packets and statuses to CPU so we can rotate them\n";
-        cudaMemcpyAsync(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost); // If I remove this, it doesnt rotate anymore
+        cudaMemcpyAsync(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost);
         if (print_cuda_errors())
         {
             return 99;
         }
-        cudaMemcpyAsync(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost); // I always leave this in
+        cudaMemcpyAsync(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost);
         if (print_cuda_errors())
         {
             return 99;
@@ -609,7 +661,7 @@ void showConfig()
     std::cout << "BATCH_SIZE=" << BATCH_SIZE << std::endl;
 
     // TODO: Include more aspects of the program to get a more accurate estimate
-    std::cout << "Estimated GPU Memory use (actual will be higher): " << ((BATCH_SIZE * sizeof(Packet)) / (1024.0 * 1024.0 * 1024.0)) << "GiB\n";
+    std::cout << "Estimated GPU Memory use (actual will be a few more bytes): " << ((BATCH_SIZE * BYTES_PER_KEY) / (1024.0 * 1024.0 * 1024.0)) << "GiB\n";
 
     const char *CUDA_VISIBLE_DEVICES = std::getenv("CUDA_VISIBLE_DEVICES");
     std::cout << "CUDA_VISIBLE_DEVICES=";
