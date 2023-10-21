@@ -238,13 +238,13 @@ BruteforceRange BruteforceRange::parse(std::string path)
 // this sets what portion of it to check.
 // The keyspace indexes starts at 0
 // You can use -1 for end to indicate the end of the keyspace
-void BruteforceRange::limits(uint64_t start = 0, uint64_t end = -1)
+void BruteforceRange::limits(uint64_t start = 0, uint64_t end = static_cast<uint64_t>(-1))
 {
     // TODO do it in a more optimal way
     start_when_ = start;
 
     // end is unsigned so technically this is 2^64 but the evaluation works just the same and -1 is the only negative number we need
-    if (end != -1)
+    if (end != static_cast<uint64_t>(-1))
     {
         done_when_ = end;
         std::cout << "Will end the search early, once the state reaches " << done_when_;
