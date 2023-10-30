@@ -15,7 +15,7 @@ using json = nlohmann::json;
 // a=10010001
 // b=10010111
 // the common prefix is [10010] and the suffix is [001] or [111] - 3 bits
-uint64_t variable_suffix_bits(uint64_t a, uint64_t b)
+__device__ __host__ uint64_t variable_suffix_bits(uint64_t a, uint64_t b)
 {
     uint64_t suffix_len = 0;
     while (a != b)

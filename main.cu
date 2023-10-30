@@ -13,10 +13,14 @@
 #include <ios>
 #include <unordered_map>
 
+#include <string>
+#include <locale>
+#include <sstream>
+__device__ volatile int found_key_gpu_volatile = 0;
+
 // Device Constant memory should be faster to access but
 // 1) Is read only
 // 2) Is only 64KB
-__constant__ uint64_t BATCH_SIZE_GPU = BATCH_SIZE;
 __constant__ uint8_t ciphertext_gpu[16];
 __constant__ uint8_t plaintext_cbc_gpu[16];
 __constant__ const uint8_t key_high[] = {
@@ -38,173 +42,417 @@ __constant__ const uint8_t key_high[] = {
     0x12,
 };
 
-__device__ void aes_decrypt(Packet packets[], PacketStatus statuses[])
+template <typename T>
+__device__ void deviceSwap(T &a, T &b)
 {
-    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    T temp = a;
+    a = b;
+    b = temp;
+}
 
-    // We spin up threads via blocks which have a specified number of threads each
-    // Sometimes we end up with more threads than we need
-    // because n is not evenly divisible by threads per block
-    // This exits the thread if its an extra thread
-    if (thread_id >= BATCH_SIZE_GPU)
+// Variables that are read in from the json
+__constant__ uint64_t perfcounter_min;
+__constant__ uint64_t perfcounter_max;
+__constant__ uint64_t perfcounter_keyspace;
+
+__constant__ uint64_t filetime_step;
+__constant__ uint64_t filetime_min;
+__constant__ uint64_t filetime_max;
+__constant__ uint64_t filetime_keyspace;
+
+__constant__ uint64_t pid_min;
+__constant__ uint64_t pid_max;
+__constant__ uint64_t pid_step;
+__constant__ uint64_t pid_keyspace;
+
+__constant__ uint64_t tid_min;
+__constant__ uint64_t tid_max;
+__constant__ uint64_t tid_step;
+__constant__ uint64_t tid_keyspace;
+
+__constant__ uint64_t pc_step;
+__constant__ uint64_t pc_mask;
+__constant__ uint64_t gtc_prefix;
+__constant__ uint64_t perfcounter_xor_keyspace_gpu;
+
+__constant__ uint64_t total_keyspace_gpu;
+
+__host__ void perfcounter_xor_set_host(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc, uint64_t min_gtc, uint64_t max_gtc)
+{
+    /////
+
+    uint64_t pc_step = uint64_t{1} << variable_suffix_bits(min_gtc, max_gtc);
+    uint64_t pc_mask = ~(pc_step - uint64_t{1});
+    uint64_t gtc_prefix = (min_gtc & pc_mask);
+    //////
+
+    uint64_t max_pc = *min_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+
+    uint64_t min_pc2 = *min_pc ^ gtc_prefix;
+    uint64_t max_pc2 = max_pc ^ gtc_prefix;
+    if (max_pc2 < min_pc2)
     {
-        return;
+        std::swap(min_pc2, max_pc2);
     }
 
-    // Do not decrypt packets which have not yet finished having SHA ran against it
-    if (statuses[thread_id] != PacketStatus::ReadyForAES)
+    // Set the variables
+    *perfcounter_xor_min = (min_pc2 & pc_mask);
+    *perfcounter_xor_max = (max_pc2 & pc_mask) + pc_step;
+    // *perfcounter_xor_keyspace = (*perfcounter_xor_max - *perfcounter_xor_min + 1);
+    *perfcounter_xor = *perfcounter_xor_min;
+
+    // if ((blockIdx.x * blockDim.x + threadIdx.x) == 0)
+    // {
+    //     printf("%llu\n", (*perfcounter_xor_max - *perfcounter_xor_min + 1));
+    // }
+}
+
+__device__ void perfcounter_xor_set_gpu(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc)
+{
+    uint64_t max_pc = *min_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+
+    uint64_t min_pc2 = *min_pc ^ gtc_prefix;
+    uint64_t max_pc2 = max_pc ^ gtc_prefix;
+    if (max_pc2 < min_pc2)
     {
-        return;
+        deviceSwap(min_pc2, max_pc2);
     }
 
-    // Upper half of the key is constant
+    // Set the variables
+    *perfcounter_xor_min = (min_pc2 & pc_mask);
+    *perfcounter_xor_max = (max_pc2 & pc_mask) + pc_step;
+    // *perfcounter_xor_keyspace = (*perfcounter_xor_max - *perfcounter_xor_min + 1);
+    *perfcounter_xor = *perfcounter_xor_min;
+}
+
+__device__ void update_perfcounter_xor()
+{
+}
+
+__global__ void process_packet(bool *found_key, uint8_t *device_final_key)
+{
+    // Store thread_id so we know what key to use
+    uint64_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // We need to know total threads so we know when make a huge jump
+    // This avoids one thread from going on so long that it starts doing work another thread started at
+    uint64_t total_threads = (uint64_t)gridDim.x * (uint64_t)blockDim.x;
+
+    // How many keys will each thread try
+    // This is rounded up as its not always perfect
+    // An unrealistic but easy math example: 6 keys with 4 threads would mean two theads need to process 2 keys with the remaing four threads only process 1
+    // The left overs should be handled by the key exhaustion logic
+    // The startIdx is what key index to start at and will be processed
+    // The endIdx is what key index to stop at and will not be processed
+    uint64_t startIdx, endIdx;
+    {
+        // This computation block is so that baseKeysPerThread and remainingKeys go out of scope
+
+        uint64_t baseKeysPerThread = total_keyspace_gpu / total_threads;
+        uint64_t remainingKeys = total_keyspace_gpu % total_threads;
+
+        startIdx = thread_id * baseKeysPerThread + (thread_id < remainingKeys ? thread_id : remainingKeys);
+        endIdx = startIdx + baseKeysPerThread + (thread_id < remainingKeys ? 1 : 0);
+
+        // if (perfcounter_xor == 19085434712)
+        // {
+        //     printf("%-20s: %llu\n", "total_keyspace_gpu", total_keyspace_gpu);
+        //     printf("%-20s: %llu\n", "total_threads", total_threads);
+        //     printf("%-20s: %llu\n", "baseKeysPerThread", baseKeysPerThread);
+        //     printf("%-20s: %llu\n", "remainingKeys", remainingKeys);
+        //     printf("%-20s: %llu\n", "Thread ID", thread_id);
+        //     printf("%-20s: %llu\n", "startIdx", startIdx);
+        //     printf("%-20s: %llu\n", "endIdx", endIdx);
+        // }
+    }
+    // Var to hold the data we will be running SHA and AES against
+    uint32_t input_data[8];
+    uint8_t decrypted_data_block_cbc[16];
     uint8_t key[32];
-    mycpy16((uint32_t *)key, (uint32_t *)packets[thread_id]);
-    mycpy16((uint32_t *)(key + 16), (uint32_t *)key_high);
-
-    uint8_t block[16];
-    mycpy16((uint32_t *)block, (uint32_t *)ciphertext_gpu);
-
     aes256_context ctx;
-    aes256_init(&ctx, key);
-    aes256_decrypt_ecb(&ctx, block);
 
-    mycpy16((uint32_t *)packets[thread_id], (uint32_t *)block);
+    // Var to keep track of the current status of the packet
+    PacketStatus status = PacketStatus::ReadyForRotation;
 
-    statuses[thread_id] = PacketStatus::ReadyForValidation;
-}
+    // Vars to control what key we are working on
+    // key_index is what index the current key we are working on would be if all the keys were stored in an array
+    // For example, 0 would be the first key with all inputs in their first value
+    // int loops = 0;                   // How many times we have gone through a total_threads amount of keys
+    uint64_t key_index = 0;          // For this loop, what key are we working on? For example, 0 would be the first key with all inputs in their first value, at least on loop 0
+    uint64_t key_index_adjusted = 0; // Var that's used to modify key_index taking into account thread_id and loop
 
-__device__ void sha_rounds(Packet packets[], PacketStatus statuses[], bool *found_key)
-{
-    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    // Since perfcounter_xor's range depends on the current value of perfcounter
+    // we need to track it per thread
+    // This section initializes vars for that purpose
+    uint64_t perfcounter_xor_min;
+    uint64_t perfcounter_xor_max;
 
-    // We spin up threads via blocks which have a specified number of threads each
-    // Sometimes we end up with more threads than we need
-    // because n is not evenly divisible by threads per block
-    // This exits the thread if its an extra thread
-    if (thread_id >= BATCH_SIZE_GPU)
+    // Vars to control the current values of the various inputs that go into a key
+    // Initialize them all to their lowest possible value as start low and work our way up
+    uint64_t perfcounter_xor;
+    uint64_t perfcounter = perfcounter_min;
+    uint64_t filetime = filetime_min;
+    uint64_t pid = pid_min;
+    uint64_t tid = tid_min;
+    perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
+
+    // Vars that control various looping
+    // We declare out here to prevent redeclaration on each iteration of the main while loop
+    bool is_done_running_sha_loop;
+    uint8_t i;
+
+    // These star blocks are representing functions
+    // We aren't using actual functions so that we can have no overhead
+    // and directly pass around the data var
+    // Perhaps using pointers would work just as well?
+
+    // We keep checking unless the key was found, even by another thread
+    // Within in the loop, if we exhaust our keyspace then we break
+    // while (!*found_key)
+    key_index = startIdx;
+    while (key_index < endIdx && found_key_gpu_volatile == 0)
     {
-        return;
-    }
-
-    // No need to run SHA against it if its already had it done and is waiting for AES
-    if (statuses[thread_id] != PacketStatus::ReadyForSHA)
-    {
-        return;
-    }
-
-    uint32_t data[8];
-    mycpy32(data, (uint32_t *)packets[thread_id]);
-
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i)
-    {
-        data[i] = __byte_perm(data[i], 0, 0x123);
-    }
-
-    // TODO: Check if the first round is always applied or not
-    bool is_done;
-    for (int round = 0; round < MAX_SHA_ROUNDS_PER_GPU_CALL; round++)
-    {
-        is_done = (data[0] & 0xFF000000) == 0 && round != 0;
-        sha256_transform(data);
-
-        if (is_done)
+        if (status == PacketStatus::ReadyForRotation)
         {
-            break;
-        }
+            /*****************************************
+             *                                       *
+             *             START ROTATION            *
+             *                                       *
+             *****************************************/
 
-        // Exit early if the key was already found by another thread
-        if (*found_key)
-        {
-            return;
-        }
-    }
+            // Adjust the key_index to be unique per thread
+            key_index_adjusted = key_index;
 
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i)
-        data[i] = __byte_perm(data[i], 0, 0x123);
-
-    mycpy32((uint32_t *)packets[thread_id], data);
-
-    // Mark the packet as ready for AES if we have finished running the SHA256_transform against it
-    // Otherwise the status will remain as ReadyForSHA and we will pick up where we left off
-    if (is_done)
-    {
-        statuses[thread_id] = PacketStatus::ReadyForAES;
-        return;
-    }
-}
-
-__global__ void process_packet(Packet packets[], PacketStatus statuses[], bool *found_key)
-{
-    int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-
-    // We spin up threads via blocks which have a specified number of threads each
-    // Sometimes we end up with more threads than we need
-    // because n is not evenly divisible by threads per block
-    // This exits the thread if its an extra thread
-    if (thread_id >= BATCH_SIZE_GPU)
-    {
-        return;
-    }
-
-    sha_rounds(packets, statuses, found_key);
-
-    // Exit early if the key was already found by another thread while we were performing the sha_rounds
-    if (*found_key)
-    {
-        return;
-    }
-
-    aes_decrypt(packets, statuses);
-
-    // Exit early if the key was already found by another thread while we were performing the aws_decryption
-    if (*found_key)
-    {
-        return;
-    }
-    // Check if we have found the key
-    // This will set the found_key to true if appropiate
-    if (statuses[thread_id] == PacketStatus::ReadyForValidation)
-    {
-        // Actually perform the validation
-        if (
-            packets[thread_id][0] != plaintext_cbc_gpu[0] ||
-            packets[thread_id][1] != plaintext_cbc_gpu[1] ||
-            packets[thread_id][2] != plaintext_cbc_gpu[2] ||
-            packets[thread_id][3] != plaintext_cbc_gpu[3] ||
-            packets[thread_id][4] != plaintext_cbc_gpu[4] ||
-            packets[thread_id][5] != plaintext_cbc_gpu[5] ||
-            packets[thread_id][6] != plaintext_cbc_gpu[6] ||
-            packets[thread_id][7] != plaintext_cbc_gpu[7] ||
-            packets[thread_id][8] != plaintext_cbc_gpu[8] ||
-            packets[thread_id][9] != plaintext_cbc_gpu[9] ||
-            packets[thread_id][10] != plaintext_cbc_gpu[10] ||
-            packets[thread_id][11] != plaintext_cbc_gpu[11] ||
-            packets[thread_id][12] != plaintext_cbc_gpu[12] ||
-            packets[thread_id][13] != plaintext_cbc_gpu[13] ||
-            packets[thread_id][14] != plaintext_cbc_gpu[14] ||
-            packets[thread_id][15] != plaintext_cbc_gpu[15])
-        {
-            statuses[thread_id] = PacketStatus::ReadyForRotation;
-        }
-        else
-        {
-            // If we get this far that means we found it!
-            *found_key = true;
-            printf("Thread %d set found_key value: %d\n", thread_id, *found_key);
-            printf("plaintext_cbc: ");
-            for (int i = 0; i < 32; ++i)
+            perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
+            key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
+            // If the perfcounter_xor should have maxed out
+            // then increment the key_index_adjusted enough
+            // so that it overflows the min value by how much it overflowed the true max
+            // Ex: if the true range is from 0-100 but the fake range is 0-1000 then
+            //     on key_index_adjusted being 130, we adjust it to 1030
+            // We don't need this for the other inputs because their ranges are constant
+            if (perfcounter_xor > perfcounter_xor_max)
             {
-                printf("%02x", packets[thread_id][i]);
+                key_index_adjusted += perfcounter_xor_keyspace_gpu - perfcounter_xor_max;
+                perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
             }
-            printf("\n");
-            statuses[thread_id] = PacketStatus::KeySpaceExhaustedOrKeyFound;
-            return;
+
+            // Get the filetime
+            filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
+            key_index_adjusted = key_index_adjusted / filetime_keyspace;
+
+            // Get the pid
+            pid = (key_index_adjusted % pid_keyspace) * pid_step + pid_min;
+            key_index_adjusted = key_index_adjusted / pid_keyspace;
+
+            // Get the tid
+            tid = (key_index_adjusted % tid_keyspace) * tid_step + tid_min;
+            key_index_adjusted = key_index_adjusted / tid_keyspace;
+
+            // Set the perfcounter then reset the perfcounter_xor because
+            // we only get here when percounter has changed and therefore perfcounter_xor has changed
+            perfcounter = (key_index_adjusted % perfcounter_keyspace) + perfcounter_min;
+            key_index_adjusted = key_index_adjusted / perfcounter_keyspace;
+
+            perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
+            key_index_adjusted = key_index;
+            perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
+            // If we used all the perfcounters that means we have ran out of keys to check
+            // if (perfcounter > perfcounter_max)
+            // {
+            //     printf("perfcounter too high\n");
+            //     status = PacketStatus::KeySpaceExhaustedOrKeyFound;
+            //     break;
+            // }
+
+            // Actually set the keys into one var
+            //                                          // These comments represent what the data was in the original Phobos
+            input_data[0] = perfcounter_xor;                  // Second call to QueryPerformanceCounter() xor'd against GetTickCount(). The reason its the second call despite being the first key is in the original Phobos, it would call GetTickCount() first then later XOR it with a new call to QueryPerformanceCounter()
+            input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter()
+            input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter()
+            input_data[3] = pid;                              // GetCurrentProcessId()
+            input_data[4] = tid;                              // GetCurrentThreadId()
+            input_data[5] = (filetime >> 32) & 0xFFFFFFFF;    // GetLocalTime() + SystemTimeToFileTime()
+            input_data[6] = filetime & 0xFFFFFFFF;            // GetLocalTime() + SystemTimeToFileTime()
+            input_data[7] = (perfcounter >> 32) & 0xFFFFFFFF; // Second call to QueryPerformanceCounter(). I think the idea behind this is that sinces its the high bits, there is a "high probability" that the first call and second call to QueryPerformanceCounter() will have the same high bits // with high probability
+
+            // Mark the packet as ready to be hashed
+            status = PacketStatus::ReadyForSHA;
+        }
+
+        /*****************************************
+         *                                       *
+         *              END ROTATION             *
+         *                                       *
+         *****************************************/
+
+        // Wait for all threads in the block to finish rotation to prevent warp divergence
+        // TODO: Check if this is actually faster or not
+        // __syncthreads();
+
+        /*****************************************
+         *                                       *
+         *               START SHA               *
+         *                                       *
+         *****************************************/
+        if (status == PacketStatus::ReadyForSHA)
+        {
+            is_done_running_sha_loop = false;
+#pragma unroll 8
+            for (i = 0; i < 8; ++i)
+            {
+                input_data[i] = __byte_perm(input_data[i], 0, 0x123);
+            }
+
+            // TODO: Check if the first round is always applied or not
+            for (i = 0; i < MAX_SHA_ROUNDS_PER_GPU_CALL; i++)
+            {
+                is_done_running_sha_loop = (input_data[0] & 0xFF000000) == 0 && i != 0;
+                sha256_transform(input_data);
+
+                // If we are all done running SHA then move onto the next step of SHA by breaking out of this for loop
+                if (is_done_running_sha_loop)
+                {
+                    break;
+                }
+            }
+
+#pragma unroll 8
+            for (i = 0; i < 8; ++i)
+                input_data[i] = __byte_perm(input_data[i], 0, 0x123);
+
+            // Mark the packet as ready for AES if we have finished running the SHA256_transform against it
+            // Otherwise the status will remain as ReadyForSHA and we will pick up where we left off
+            if (is_done_running_sha_loop)
+            {
+                status = PacketStatus::ReadyForAES;
+            }
+        }
+
+        /*****************************************
+         *                                       *
+         *                END SHA                *
+         *                                       *
+         *****************************************/
+
+        // Wait for all threads in the block to finish SHA256_transform to prevent warp divergence
+        // TODO: Check if this is actually faster or not
+        // __syncthreads();
+
+        /*****************************************
+         *                                       *
+         *               START AES               *
+         *                                       *
+         *****************************************/
+
+        if (status == PacketStatus::ReadyForAES)
+        {
+            // Upper half of the key is constant
+            mycpy16((uint32_t *)key, (uint32_t *)input_data);
+            mycpy16((uint32_t *)(key + 16), (uint32_t *)key_high);
+
+            // Copy the encypted data into a block for us to then try to decrypt with our key
+            mycpy16((uint32_t *)decrypted_data_block_cbc, (uint32_t *)ciphertext_gpu);
+
+            // Run the decryption, saving the results into decrypted_data_block_cbc
+            aes256_init(&ctx, key);
+            aes256_decrypt_ecb(&ctx, decrypted_data_block_cbc);
+
+            /*****************************************
+             *                                       *
+             *                END AES                *
+             *                                       *
+             *****************************************/
+
+            // We are still in the ReadyForAES status loop because AES always finishes and validation is always next
+            // So there is no need to waste any cycles on adjusting the status
+
+            // Wait for all threads in the block to finish aes256_decrypt_ecb to prevent warp divergence
+            // TODO: Check if this is actually faster or not
+            // __syncthreads();
+
+            /*****************************************
+             *                                       *
+             *            START VALIDATION           *
+             *                                       *
+             *****************************************/
+
+            // Check if what we decrypted is identical to the plaintext
+            // This is actually after its been xor'd with the initialization vector
+            // which is denoted by the "cbc"
+            // We do this to save the time xor'ing in this loop, squeezing out a bit more performance
+            if (
+                decrypted_data_block_cbc[0] != plaintext_cbc_gpu[0] ||
+                decrypted_data_block_cbc[1] != plaintext_cbc_gpu[1] ||
+                decrypted_data_block_cbc[2] != plaintext_cbc_gpu[2] ||
+                decrypted_data_block_cbc[3] != plaintext_cbc_gpu[3] ||
+                decrypted_data_block_cbc[4] != plaintext_cbc_gpu[4] ||
+                decrypted_data_block_cbc[5] != plaintext_cbc_gpu[5] ||
+                decrypted_data_block_cbc[6] != plaintext_cbc_gpu[6] ||
+                decrypted_data_block_cbc[7] != plaintext_cbc_gpu[7] ||
+                decrypted_data_block_cbc[8] != plaintext_cbc_gpu[8] ||
+                decrypted_data_block_cbc[9] != plaintext_cbc_gpu[9] ||
+                decrypted_data_block_cbc[10] != plaintext_cbc_gpu[10] ||
+                decrypted_data_block_cbc[11] != plaintext_cbc_gpu[11] ||
+                decrypted_data_block_cbc[12] != plaintext_cbc_gpu[12] ||
+                decrypted_data_block_cbc[13] != plaintext_cbc_gpu[13] ||
+                decrypted_data_block_cbc[14] != plaintext_cbc_gpu[14] ||
+                decrypted_data_block_cbc[15] != plaintext_cbc_gpu[15])
+            {
+                // This was not a match so mark the key as ready for rotation
+                status = PacketStatus::ReadyForRotation;
+            }
+            else
+            {
+                // If we get this far that means we found it!
+                found_key_gpu_volatile = 1;
+                *found_key = true;
+
+                // Some debugging statements
+                printf("Thread %llu set found_key value.\n", thread_id);
+                // printf("Thread %llu set found_key value after testing %llu keys.\n", thread_id, total_keys);
+                // printf("Assuming this was the average keys tested per thead, we tested ~%llu keys. Assuming this thread processed twice as many as the average we tested ~%llu.\n", (total_keys * total_threads), (total_keys * total_threads / 2));
+                printf("filetime = %llu\n", filetime);
+                printf("perfcounter = %llu\n", perfcounter);
+                printf("PID = %llu\n", pid);
+                printf("TID = %llu\n", tid);
+
+                // Copy the key that worked into a var that will later be copied down to host
+                mycpy16((uint32_t *)device_final_key, (uint32_t *)input_data);
+                mycpy16((uint32_t *)(device_final_key + 16), (uint32_t *)key_high);
+
+                // Debug statement showing the key
+                printf("AES Decryption Key [GPU]: 0x");
+#pragma unroll 32
+                for (i = 0; i < 32; ++i)
+                {
+                    printf("%02x", device_final_key[i]);
+                }
+                printf("\n");
+
+                // Since we found it, we mark this thread as done
+                status = PacketStatus::KeySpaceExhaustedOrKeyFound;
+                break;
+            }
+
+            // We fully tried this key so time to try the next one
+            key_index++;
+
+            /*****************************************
+             *                                       *
+             *             END VALIDATION            *
+             *                                       *
+             *****************************************/
+
+            // Wait for all threads in the block to finish validation to prevent warp divergence
+            // TODO: Check if this is actually faster or not
+            // __syncthreads();
         }
     }
 
+    // Wait for all threads in the block to finish to prevent warp divergence
+    // TODO: Check if this is actually faster or not
+    // __syncthreads();
     return;
 }
 
@@ -316,46 +564,6 @@ bool print_cuda_errors()
     return false;
 }
 
-// Rotate finished keys. Returns true if the full range is scanned.
-bool rotate_keys(BruteforceRange *range, Packet packets[], PacketStatus statuses[], uint32_t size)
-{
-    bool any_tasks_in_progress = false;
-
-    for (int i = 0; i < size; i++)
-    {
-        if (statuses[i] != PacketStatus::ReadyForRotation)
-        {
-            // There is at least one packet still being processed
-            if (statuses[i] != PacketStatus::KeySpaceExhaustedOrKeyFound)
-            {
-                any_tasks_in_progress = true;
-            }
-
-            // Process next packet
-            continue;
-        }
-
-        // Perform the rotation and enter statement if it couldn't rotate
-        if (!range->next(packets[i], &statuses[i], i))
-        {
-            // There are no more possible combinations to try but there could still be some combinations being processed
-            statuses[i] = PacketStatus::KeySpaceExhaustedOrKeyFound;
-
-            // Process next packet
-            // If we return here we won't evaluate the packets that have yet to finish being processed
-            continue;
-        }
-        else
-        {
-            // We could rotate this one so that means there is at least one packet which is still being processed
-            any_tasks_in_progress = true;
-        }
-    }
-
-    // Return whether or not the full range has been processed
-    return !any_tasks_in_progress;
-}
-
 int getMaxThreadsPerBlock(int device_id)
 {
     cudaDeviceProp deviceProp;
@@ -370,33 +578,130 @@ int getMaxThreadsPerBlock(int device_id)
     return deviceProp.maxThreadsPerBlock;
 }
 
-// Prints the count of each status
-void countStatuses(const PacketStatus statuses[], const size_t n)
+int getMaxBlocks(int device_id)
 {
-    std::unordered_map<PacketStatus, size_t> status_counts;
+    cudaDeviceProp deviceProp;
+    cudaError_t err = cudaGetDeviceProperties(&deviceProp, device_id);
 
-    // Initialize all possible statuses to 0.
-    status_counts[PacketStatus::ReadyForSHA] = 0;
-    status_counts[PacketStatus::ReadyForAES] = 0;
-    status_counts[PacketStatus::ReadyForValidation] = 0;
-    status_counts[PacketStatus::ReadyForRotation] = 0;
-    status_counts[PacketStatus::KeySpaceExhaustedOrKeyFound] = 0;
-    // ... initialize counts for any additional statuses to 0 ...
-
-    // Count occurrences of each status.
-    for (size_t i = 0; i < n; ++i)
+    if (err != cudaSuccess)
     {
-        status_counts[statuses[i]]++;
+        std::cerr << "Error fetching device properties: " << cudaGetErrorString(err) << std::endl;
+        return -1;
     }
 
-    // Output the counts.
-    std::cout << "Status counts:\n";
-    std::cout << "ReadyForSHA:                 " << status_counts[PacketStatus::ReadyForSHA] << "\n";
-    std::cout << "ReadyForAES:                 " << status_counts[PacketStatus::ReadyForAES] << "\n";
-    std::cout << "ReadyForValidation:          " << status_counts[PacketStatus::ReadyForValidation] << "\n";
-    std::cout << "ReadyForRotation:            " << status_counts[PacketStatus::ReadyForRotation] << "\n";
-    std::cout << "KeySpaceExhaustedOrKeyFound: " << status_counts[PacketStatus::KeySpaceExhaustedOrKeyFound] << "\n";
-    // ... output counts for any additional statuses ...
+    return deviceProp.maxGridSize[0];
+}
+
+__host__ uint64_t get_perfcounter_xor_keyspace(uint64_t perfcounter_min, uint64_t perfcounter_max, std::vector<uint64_t> &keyspaceRecord, uint64_t min_gtc, uint64_t max_gtc)
+{
+    uint64_t perfcounter_xor = 0;
+    uint64_t perfcounter_xor_min = 0;
+    uint64_t perfcounter_xor_max = 0;
+
+    // Vars to store the keyspace so we can find the largest one
+    uint64_t perfcounter_xor_keyspace_max = 0;
+    uint64_t perfcounter_xor_keyspace_cur = 0;
+
+    for (uint64_t i = perfcounter_min; i <= perfcounter_max; i++)
+    {
+        // Calculate the xor range
+        perfcounter_xor_set_host(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &i, min_gtc, max_gtc);
+
+        // Calculate the xor keyspace
+        perfcounter_xor_keyspace_cur = (perfcounter_xor_max - perfcounter_xor_min + 1);
+
+        // Record xor keyspace so we can later calculate the total keyspace
+        keyspaceRecord.push_back(perfcounter_xor_keyspace_cur);
+
+        // Record the highest keyspace we found so we know what use as its upperbound in GPU
+        if (perfcounter_xor_keyspace_cur > perfcounter_xor_keyspace_max)
+        {
+            perfcounter_xor_keyspace_max = perfcounter_xor_keyspace_cur;
+        }
+    }
+
+    return perfcounter_xor_keyspace_max;
+}
+
+std::string format_number(uint64_t value)
+{
+    std::stringstream ss;
+    ss.imbue(std::locale("")); // Use the current locale to format numbers with thousands separators
+    ss << value;
+    return ss.str();
+}
+
+// Returns the total keyspace
+uint64_t set_inputs_on_gpu()
+{
+    // Set the straight foward vars
+    std::cout << "Setting input variables in GPU Memory" << std::endl;
+    const uint64_t h_perfcounter_min = 19084705045;
+    const uint64_t h_perfcounter_max = 19084705050;
+    const uint64_t h_perfcounter_keyspace = (h_perfcounter_max - h_perfcounter_min + 1);
+    cudaMemcpyToSymbol(perfcounter_min, &h_perfcounter_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(perfcounter_max, &h_perfcounter_max, sizeof(uint64_t));
+    cudaMemcpyToSymbol(perfcounter_keyspace, &h_perfcounter_keyspace, sizeof(uint64_t));
+    assert(h_perfcounter_min <= h_perfcounter_max);
+
+    const uint64_t h_filetime_step = 10000;
+    const uint64_t h_filetime_min = 132489479687990000;
+    const uint64_t h_filetime_max = 132489479687990000;
+    const uint64_t h_filetime_keyspace = (h_filetime_max - h_filetime_min + h_filetime_step) / h_filetime_step;
+    cudaMemcpyToSymbol(filetime_step, &h_filetime_step, sizeof(uint64_t));
+    cudaMemcpyToSymbol(filetime_min, &h_filetime_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(filetime_max, &h_filetime_max, sizeof(uint64_t));
+    cudaMemcpyToSymbol(filetime_keyspace, &h_filetime_keyspace, sizeof(uint64_t));
+    assert(h_filetime_min <= h_filetime_max);
+
+    const uint64_t h_pid_min = 3152;
+    const uint64_t h_pid_max = 3152;
+    const uint64_t h_pid_step = 4;
+    const uint64_t h_pid_keyspace = (h_pid_max - h_pid_min + h_pid_step) / h_pid_step;
+    cudaMemcpyToSymbol(pid_min, &h_pid_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(pid_max, &h_pid_max, sizeof(uint64_t));
+    cudaMemcpyToSymbol(pid_step, &h_pid_step, sizeof(uint64_t));
+    cudaMemcpyToSymbol(pid_keyspace, &h_pid_keyspace, sizeof(uint64_t));
+    assert(h_pid_min <= h_pid_max);
+
+    const uint64_t h_tid_min = 1488;
+    const uint64_t h_tid_max = 1492;
+    const uint64_t h_tid_step = 4;
+    const uint64_t h_tid_keyspace = (h_tid_max - h_tid_min + h_tid_step) / h_tid_step;
+    cudaMemcpyToSymbol(tid_min, &h_tid_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(tid_max, &h_tid_max, sizeof(uint64_t));
+    cudaMemcpyToSymbol(tid_step, &h_tid_step, sizeof(uint64_t));
+    cudaMemcpyToSymbol(tid_keyspace, &h_tid_keyspace, sizeof(uint64_t));
+    assert(h_tid_min <= h_tid_max);
+
+    // Initialize the vars for the second percounter call that's xor'd with the tick count
+    std::cout << "Working on XOR Vars" << std::endl;
+    const uint64_t h_min_gtc = 1910437;
+    const uint64_t h_max_gtc = 1910437;
+    const uint64_t h_pc_step = uint64_t{1} << variable_suffix_bits(h_min_gtc, h_max_gtc);
+    const uint64_t h_pc_mask = ~(h_pc_step - uint64_t{1});
+    const uint64_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
+    cudaMemcpyToSymbol(pc_step, &h_pc_step, sizeof(uint64_t));
+    cudaMemcpyToSymbol(pc_mask, &h_pc_mask, sizeof(uint64_t));
+    cudaMemcpyToSymbol(gtc_prefix, &h_gtc_prefix, sizeof(uint64_t));
+    assert(h_min_gtc <= h_max_gtc);
+
+    std::cout << "Calculating perfcounter_xor keyspace" << std::endl;
+    std::vector<uint64_t> recordedKeyspaces;
+    uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces, h_min_gtc, h_max_gtc);
+    std::cout << "Maximum perfcounter_xor keyspace: " << format_number(h_perfcounter_xor_keyspace) << std::endl;
+    cudaMemcpyToSymbol(perfcounter_xor_keyspace_gpu, &h_perfcounter_xor_keyspace, sizeof(uint64_t));
+
+    std::cout << "\n\nCalculating total keyspace" << std::endl;
+    const uint64_t total_keyspace_no_xor = h_perfcounter_keyspace * h_filetime_keyspace * h_pid_keyspace * h_tid_keyspace;
+    uint64_t total_keyspace = 0;
+    for (const auto &value : recordedKeyspaces)
+    {
+        total_keyspace += value * total_keyspace_no_xor;
+    }
+    std::cout << "Total keyspace: " << format_number(total_keyspace) << "\n"
+              << std::endl;
+    return total_keyspace;
 }
 
 int brute(const PhobosInstance &phobos, BruteforceRange *range)
@@ -404,54 +709,9 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     // Record the start time to measure the overall execution time.
     auto gt1 = std::chrono::high_resolution_clock::now();
     std::cout << "\nOkay, let's crack some keys!\n";
-    std::cout << "Total keyspace: " << range->keyspace() << "\n\n";
-
-    // Define data structures for packets on both CPU and GPU.
-    Packets packets_gpu, packets_cpu;
-
-    // Allocate memory for packet data on CPU and GPU.
-    std::cout << "Allocating memory for packet data on CPU and GPU\n";
-    cudaMallocHost(&packets_cpu.data, BATCH_SIZE * sizeof(Packet));
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaMalloc(&packets_gpu.data, BATCH_SIZE * sizeof(Packet));
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-
-    // Allocate memory for packet statuses on CPU and GPU.
-    std::cout << "Allocating memory for packet statuses on CPU and GPU\n";
-    cudaMallocHost(&packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaMalloc(&packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus));
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
 
     // Copy plaintext_cbc data to GPU
     cudaMemcpyToSymbol(plaintext_cbc_gpu, phobos.plaintext_cbc().data(), sizeof(Block16));
-
-    // Initialise all packets
-    std::cout << "Initializing all packet statuses\n";
-    for (int x = 0; x < BATCH_SIZE; x++)
-    {
-        packets_cpu.statuses[x] = PacketStatus::ReadyForRotation;
-    }
-
-    // Copy packet data and statuses from CPU to GPU.
-    std::cout << "Copying packet statuses from CPU to GPU\n";
-    cudaMemcpy(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
 
     // Copy the ciphertext from the PhobosInstance from CPU to GPU.
     std::cout << "Copying the ciphertext from the PhobosInstance on CPU to GPU\n\n";
@@ -459,7 +719,6 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Delcare outside the loop to prevent reinitialization
     // Compiler might be doing this under the hood but just in case...
-    float percent = 0.0f;
     auto t1 = std::chrono::high_resolution_clock::now();
     auto t2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
@@ -478,145 +737,84 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
         return 99;
     }
 
+    uint8_t *host_final_key = (uint8_t *)malloc(32 * sizeof(uint8_t));
+    uint8_t *device_final_key;
+    cudaMalloc((void **)&device_final_key, 32 * sizeof(uint8_t));
+    if (print_cuda_errors())
+    {
+        return 99;
+    }
+
+    // Copy inputs onto GPU memory and calculate the total keyspace
+    uint64_t total_keyspace = set_inputs_on_gpu();
+    cudaMemcpyToSymbol(total_keyspace_gpu, &total_keyspace, sizeof(uint64_t));
+
     // Define the blocks/threads for the CUDA/Device/Kernal/GPU functions
     // AKA the Launch Configuration
-    const float adjustment_for_resource_error = 1.75;                                            // If we don't adjust we get an error "too many resources requested for launch". Really not sure why but reducing threads per block fixes it so thats the bandaid for now as we want the threads to be dynamic based on BATCH_SIZE to ensure there is a thread per packet
-    const int threadsPerBlock = (float)getMaxThreadsPerBlock(0) / adjustment_for_resource_error; // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
-    const int numBlocks = ((BATCH_SIZE + threadsPerBlock - 1) / threadsPerBlock);                // This rounds up to ensure all elements are processed.
+    // const float adjustment_for_resource_error = 1.75; // If we don't adjust we get an error "too many resources requested for launch". Really not sure why but reducing threads per block fixes it so thats the bandaid for now as we want the threads to be dynamic based on BATCH_SIZE to ensure there is a thread per packet
+    // const int threadsPerBlock = 640;                                              // (float)getMaxThreadsPerBlock(0) / adjustment_for_resource_error; // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+    // const int numBlocks = ((BATCH_SIZE + threadsPerBlock - 1) / threadsPerBlock); // This rounds up to ensure all elements are processed.
+
+    const int threadsPerBlock = 512; // getMaxThreadsPerBlock(0); // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+    // const int numBlocks = getMaxBlocks(0); // This rounds up to ensure all elements are processed.
+    const int numBlocks = (total_keyspace + threadsPerBlock - 1) / threadsPerBlock;
+
+    const uint64_t totalThreads = (uint64_t)threadsPerBlock * (uint64_t)numBlocks;
+    std::cout << "\n";
     std::cout << "Total Blocks:      " << numBlocks << "\n";
     std::cout << "Threads per block: " << threadsPerBlock << "\n";
-    std::cout << "Total Threads:     " << (threadsPerBlock * numBlocks) << "\n";
-    assert((threadsPerBlock * numBlocks) >= BATCH_SIZE); // Ensure that we always have enough threads for each packet we are working on
+    std::cout << "Total Threads:     " << totalThreads << "\n";
+    std::cout << "\n";
+    // assert((threadsPerBlock * numBlocks) >= BATCH_SIZE); // Ensure that we always have enough threads for each packet we are working on
 
-    // Calculate the percentage of progress and display the current state.
-    percent = range->progress() * 100.0;
-    std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
-    std::cout << "Total Keys Tried: " << range->total_keys_tried() << "\n";
-    std::cout << "You may see the program get stuck at a state/percentage. This is expected and due to it still processing some packets. The state increases as a new attempt is started, not when its finished.\n";
+    // Ensure we don't waste any threads
+    assert((threadsPerBlock % 32) == 0); // Ensure that we always have enough threads for each packet we are working on
 
-    // Initalize all the packets with data before entering the loop
-    std::cout << "Initializing all the packets\n";
-    rotate_keys(range, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE);
-    cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
+    // Record the start time for measuring how long it took to run
+    t1 = std::chrono::high_resolution_clock::now();
+
+    std::cout << "Starting the GPU Threads\n";
+    process_packet<<<numBlocks, threadsPerBlock>>>(found_key_gpu, device_final_key);
+    std::cout << "Waiting for the GPU Threads\n";
     cudaDeviceSynchronize();
 
-    // Start the brute-force attack
-    while (true)
+    // Copy down the flag that is set when we have found the key
+    cudaMemcpy(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
+
+    // Check if we found the key and if so, present it to the user
+    if (found_key)
     {
+        std::cout << "Key found! Copying key from GPU...\n";
+        cudaMemcpy(host_final_key, device_final_key, 32 * sizeof(uint8_t), cudaMemcpyDeviceToHost);
 
-        // Record the start time for measuring the duration of each batch.
-        t1 = std::chrono::high_resolution_clock::now();
-
-        // Calculate the percentage of progress and display the current state.
-        percent = range->progress() * 100.0;
-        std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
-        std::cout << "Total Keys Tried/Currently Being Processed: " << range->total_keys_tried() << "\n";
-
-        process_packet<<<numBlocks, threadsPerBlock>>>(packets_gpu.data, packets_gpu.statuses, found_key_gpu);
-        if (print_cuda_errors())
+        std::cout << "AES Decryption Key [CPU]: 0x" << std::hex;
+        for (int i = 0; i < 32; ++i)
         {
-            return 99;
+            std::cout << std::setw(2) << std::setfill('0')
+                      << static_cast<uint32_t>((host_final_key)[i]);
         }
-
-        std::cout << "Copying GPU results to CPU for found flag\n";
-        cudaMemcpy(&found_key, found_key_gpu, sizeof(bool), cudaMemcpyDeviceToHost);
-        if (print_cuda_errors())
-        {
-            return 99;
-        }
-        if (found_key)
-        {
-            std::cout << "Found needle in GPU\n";
-            found_key = true;
-            break;
-        }
-
-        // Copy the results from GPU to CPU
-        // We need to copy the full data from the GPU as some SHA hashing may be incomplete and later we overwrite it when we rotate the keys so we neeed to the original value so that we don't change the value when we overwrite it
-        std::cout << "Copying GPU packets and statuses to CPU so we can rotate them\n";
-        cudaMemcpyAsync(packets_cpu.data, packets_gpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyDeviceToHost);
-        if (print_cuda_errors())
-        {
-            return 99;
-        }
-        cudaMemcpyAsync(packets_cpu.statuses, packets_gpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyDeviceToHost);
-        if (print_cuda_errors())
-        {
-            return 99;
-        }
-        cudaDeviceSynchronize();
-
-        // Rotate keys and check if the full range is scanned.
-        std::cout << "Rotating keys\n";
-        if (rotate_keys(range, packets_cpu.data, packets_cpu.statuses, BATCH_SIZE))
-        {
-            std::cout << "Keyspace exhausted and nothing found\n";
-            break;
-        }
-
-        // Copy the next batch of tasks from CPU to GPU asynchronously.
-        std::cout << "Copying next batch to GPU!\n";
-        cudaMemcpyAsync(packets_gpu.data, packets_cpu.data, BATCH_SIZE * sizeof(Packet), cudaMemcpyHostToDevice);
-        if (print_cuda_errors())
-        {
-            return 99;
-        }
-        cudaMemcpyAsync(packets_gpu.statuses, packets_cpu.statuses, BATCH_SIZE * sizeof(PacketStatus), cudaMemcpyHostToDevice);
-        if (print_cuda_errors())
-        {
-            return 99;
-        }
-        cudaDeviceSynchronize();
-
-        // Record the end time of the batch and calculate its duration.
-        t2 = std::chrono::high_resolution_clock::now();
-        duration2 = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-        std::cout << "Batch total time: " << ((float)duration2 / 1000000) << "s" << std::endl
-                  << std::endl;
+        std::cout << std::dec << std::endl;
+    }
+    else
+    {
+        std::cout << "The key was not found.\n";
     }
 
     // Record the end time of the brute-force attack and calculate total duration.
     auto gt2 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(gt2 - gt1).count();
-    std::cout << "\nTotal time: " << ((float)duration / 1000000) << std::endl;
-    countStatuses(packets_cpu.statuses, BATCH_SIZE);
+    double seconds = ((double)duration / 1000000);
+    std::cout << "\nTotal time: " << seconds << " seconds" << std::endl;
+    std::cout << "Keys Per Second: " << format_number(total_keyspace / seconds) << " kps" << std::endl;
+    if (found_key)
+    {
+        std::cout << "Warning: The keys per second is over estimated because the key was found and therefore not all keys in the keyspace were actually tested." << std::endl;
+    }
+    std::cout << std::endl
+              << std::endl;
 
-    // Calculate the percentage of progress and display the current state.
-    percent = range->progress() * 100.0;
-    std::cout << "\nState: " << range->current() << "/" << range->done_when() << " (" << percent << "%)\n";
-    std::cout << "Total Keys Tried: " << range->total_keys_tried() << "\n";
-
-    // Free allocated memory on CPU and GPU.
-    cudaFreeHost(packets_cpu.data);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaFree(packets_gpu.data);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaFreeHost(packets_cpu.statuses);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaFree(packets_gpu.statuses);
-    if (print_cuda_errors())
-    {
-        return 99;
-    }
-    cudaFree(found_key_gpu);
+    // Free memory on GPU
+    cudaDeviceReset();
     if (print_cuda_errors())
     {
         return 99;
