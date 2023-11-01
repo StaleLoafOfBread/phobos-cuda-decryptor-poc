@@ -32,7 +32,7 @@ using Block16 = std::array<uint8_t, 16>;
 // Otherwise, one key that requires 1,000,000 sha rounds will force the other threads to remain idle while it finishes
 // It will take on average 256 sha rounds, so a number lower than that was chosen, thus increasing the chance we have no idle threads
 // A number too low will increase how many times we need to transfer memory between the GPU and CPU, increasing total time
-__constant__ const int MAX_SHA_ROUNDS_PER_GPU_CALL = 1024 * 2; // 192; /// Actually a high number but not too high seems to help? I think maybe it lowers diverence while not allowing the few outliers to keep the rest waiting? This will need further investigation.
+__constant__ const uint16_t MAX_SHA_ROUNDS_PER_GPU_CALL = 1024 * 2; // 192; /// Actually a high number but not too high seems to help? I think maybe it lowers diverence while not allowing the few outliers to keep the rest waiting? This will need further investigation.
 
 // How many bytes will we be using for each packet/key we attempt
 const int BYTES_PER_KEY = sizeof(Packet) + sizeof(PacketStatus);
@@ -136,3 +136,4 @@ public:
 };
 
 uint64_t variable_suffix_bits(uint64_t a, uint64_t b);
+uint32_t variable_suffix_bits_optimized(uint32_t a, uint32_t b);
