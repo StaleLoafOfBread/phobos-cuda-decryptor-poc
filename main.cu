@@ -667,9 +667,15 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     // const int threadsPerBlock = 640;                                              // (float)getMaxThreadsPerBlock(0) / adjustment_for_resource_error; // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
     // const int numBlocks = ((BATCH_SIZE + threadsPerBlock - 1) / threadsPerBlock); // This rounds up to ensure all elements are processed.
 
+    // Threads per block should be a multiple of warp size to avoid wasting computation on under-populated warps and to facilitate coalescing.
+    // A minimum of 64 threads per block should be used, and only if there are multiple concurrent blocks per multiprocessor.
+    // Between 128 and 256 threads per block is a good initial range for experimentation with different block sizes.
+    // Use several smaller thread blocks rather than one large thread block per multiprocessor if latency affects performance. This is particularly beneficial to kernels that frequently call __syncthreads().
+    // https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#thread-and-block-heuristics
     const int threadsPerBlock = 64; // getMaxThreadsPerBlock(0); // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
-    // const int numBlocks = getMaxBlocks(0); // This rounds up to ensure all elements are processed.
-    const int numBlocks = (total_keyspace + threadsPerBlock - 1) / threadsPerBlock;
+
+    // We set the total number of blocks such that there is at least one thread per key unless that exceeds the GPU's max, in which case we use the max
+    const int numBlocks = (int)(std::min((uint64_t)getMaxBlocks(0), (uint64_t)((total_keyspace + threadsPerBlock - 1) / threadsPerBlock)));
 
     const uint64_t totalThreads = (uint64_t)threadsPerBlock * (uint64_t)numBlocks;
     std::cout << "\n";
@@ -677,7 +683,6 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "Threads per block: " << threadsPerBlock << "\n";
     std::cout << "Total Threads:     " << totalThreads << "\n";
     std::cout << "\n";
-    // assert((threadsPerBlock * numBlocks) >= BATCH_SIZE); // Ensure that we always have enough threads for each packet we are working on
 
     // Ensure we don't waste any threads
     assert((threadsPerBlock % 32) == 0);
