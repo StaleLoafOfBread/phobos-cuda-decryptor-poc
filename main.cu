@@ -563,6 +563,8 @@ uint64_t set_inputs_on_gpu()
     cudaMemcpyToSymbol(filetime_max, &h_filetime_max, sizeof(uint64_t));
     cudaMemcpyToSymbol(filetime_keyspace, &h_filetime_keyspace, sizeof(uint64_t));
     assert(h_filetime_min <= h_filetime_max);
+    assert(h_filetime_min % filetime_step == 0);
+    assert(h_filetime_max % filetime_step == 0);
 
     const uint32_t h_pid_min = 3152;
     const uint32_t h_pid_max = 3152;
@@ -573,6 +575,8 @@ uint64_t set_inputs_on_gpu()
     cudaMemcpyToSymbol(pid_and_tid_step, &h_pid_and_tid_step, sizeof(uint8_t));
     cudaMemcpyToSymbol(pid_keyspace, &h_pid_keyspace, sizeof(uint32_t));
     assert(h_pid_min <= h_pid_max);
+    assert(h_pid_min % h_pid_and_tid_step == 0);
+    assert(h_pid_max % h_pid_and_tid_step == 0);
 
     const uint32_t h_tid_min = 1488;
     const uint32_t h_tid_max = 1492;
@@ -581,6 +585,8 @@ uint64_t set_inputs_on_gpu()
     cudaMemcpyToSymbol(tid_max, &h_tid_max, sizeof(uint32_t));
     cudaMemcpyToSymbol(tid_keyspace, &h_tid_keyspace, sizeof(uint32_t));
     assert(h_tid_min <= h_tid_max);
+    assert(h_tid_min % h_pid_and_tid_step == 0);
+    assert(h_tid_max % h_pid_and_tid_step == 0);
 
     // Initialize the vars for the second percounter call that's xor'd with the tick count
     std::cout << "Working on XOR Vars" << std::endl;
