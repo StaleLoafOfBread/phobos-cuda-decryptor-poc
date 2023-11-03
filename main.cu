@@ -612,6 +612,23 @@ uint64_t set_inputs_on_gpu()
     return total_keyspace;
 }
 
+std::string formatDuration(int seconds)
+{
+    if (seconds < 0)
+    {
+        return "Invalid input";
+    }
+
+    int hours = seconds / 3600;
+    int minutes = (seconds % 3600) / 60;
+    int remainingSeconds = seconds % 60;
+
+    std::string result = std::to_string(hours) + "h " +
+                         std::to_string(minutes) + "m " +
+                         std::to_string(remainingSeconds) + "s";
+    return result;
+}
+
 int brute(const PhobosInstance &phobos, BruteforceRange *range)
 {
     // Record the start time to measure the overall execution time.
@@ -659,7 +676,8 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Debug lines during speed testing
     const uint64_t estimated_kps = 4028352;
-    std::cout << "Assuming " << estimated_kps << " keys per second, this will take up to " << (total_keyspace / estimated_kps) << " seconds" << std::endl;
+    const uint64_t estimated_seconds = total_keyspace / estimated_kps;
+    std::cout << "Assuming " << format_number(estimated_kps) << " keys per second this will take " << formatDuration(estimated_seconds) << std::endl;
 
     // Define the blocks/threads for the CUDA/Device/Kernal/GPU functions
     // AKA the Launch Configuration
