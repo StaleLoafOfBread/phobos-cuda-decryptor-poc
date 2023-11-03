@@ -64,14 +64,14 @@ __constant__ uint64_t perfcounter_min;
 __constant__ uint64_t perfcounter_max;
 __constant__ uint64_t perfcounter_keyspace;
 
-__constant__ int filetime_step;
+__constant__ uint16_t filetime_step;
 __constant__ uint64_t filetime_min;
 __constant__ uint64_t filetime_max;
 __constant__ uint64_t filetime_keyspace;
 
 __constant__ uint32_t pid_min;
 __constant__ uint32_t pid_max;
-__constant__ int pid_and_tid_step;
+__constant__ uint8_t pid_and_tid_step;
 __constant__ uint32_t pid_keyspace;
 
 __constant__ uint32_t tid_min;
@@ -122,7 +122,6 @@ __device__ void perfcounter_xor_set_gpu(uint64_t *perfcounter_xor, uint64_t *per
     // Set the variables
     *perfcounter_xor_min = (min_pc2 & pc_mask);
     *perfcounter_xor_max = (max_pc2 & pc_mask) + pc_step;
-    // *perfcounter_xor_keyspace = (*perfcounter_xor_max - *perfcounter_xor_min + 1);
     *perfcounter_xor = *perfcounter_xor_min;
 }
 
@@ -133,13 +132,15 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
     // What key index to test. This
     // For example, thread 0 will always start at index 0 but thread 1 may start at 1 if each thread only handles 1 key.
-    uint64_t key_index = thread_id * baseKeysPerThread + (thread_id < remainingKeys ? thread_id : remainingKeys);
+    // Reason for being signed: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#loop-counters-signed-vs-unsigned
+    int64_t key_index = thread_id * baseKeysPerThread + (thread_id < remainingKeys ? thread_id : remainingKeys);
 
     // What key index to stop at
     // For example thead 0 will stop at index 1 if each thread only handles 1 key.
     // In that scenario thread 1 would stop at 2.
     // The thread will not test the key at the endIdx, instead the next thread will start there
-    const uint64_t endIdx = key_index + baseKeysPerThread + (thread_id < remainingKeys ? 1 : 0);
+    // Reason for being signed: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#loop-counters-signed-vs-unsigned
+    const int64_t endIdx = key_index + baseKeysPerThread + (thread_id < remainingKeys ? 1 : 0);
 
     // Var to hold the data we will be running SHA and AES against
     uint32_t input_data[8];
@@ -147,13 +148,11 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint8_t key[32];
     aes256_context ctx;
 
-    // Var to keep track of the current status of the packet
-    PacketStatus status = PacketStatus::ReadyForRotation;
-
     // Vars to control what key we are working on
     // key_index is what index the current key we are working on would be if all the keys were stored in an array
     // For example, 0 would be the first key with all inputs in their first value
-    uint64_t key_index_adjusted = 0; // Var that's used to modify key_index taking into account thread_id and loop
+    // Reason for being signed: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#loop-counters-signed-vs-unsigned
+    int64_t key_index_adjusted = 0;
 
     // Since perfcounter_xor's range depends on the current value of perfcounter
     // we need to track it per thread
@@ -170,11 +169,6 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint32_t tid = tid_min;
     perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
 
-    // Vars that control various looping
-    // We declare out here to prevent redeclaration on each iteration of the main while loop
-    bool is_done_running_sha_loop;
-    uint8_t i;
-
     // These star blocks are representing functions
     // We aren't using actual functions so that we can have no overhead
     // and directly pass around the data var
@@ -182,72 +176,60 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
     // We keep checking unless the key was found, even by another thread
     // Within in the loop, if we exhaust our keyspace then we break
-    while (key_index < endIdx && found_key_gpu_volatile == 0)
+    __syncthreads();
+    while (key_index < endIdx && !*found_key)
     {
+        /*****************************************
+         *                                       *
+         *             START ROTATION            *
+         *                                       *
+         *****************************************/
 
-        // TODO: Check if this is actually faster or not
-        // __syncthreads();
+        // Adjust the key_index to be unique per thread
+        key_index_adjusted = key_index;
 
-        if (status == PacketStatus::ReadyForRotation)
+        // Set the perfcounter then reset the perfcounter_xor because it may be different now
+        perfcounter = (key_index_adjusted % perfcounter_keyspace) + perfcounter_min;
+        key_index_adjusted = key_index_adjusted / perfcounter_keyspace;
+        perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
+
+        perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
+        // If the perfcounter_xor should have maxed out
+        // then increment the key_index_adjusted enough
+        // so that it overflows the min value by how much it overflowed the true max
+        // Ex: if the true range is from 0-100 but the fake range is 0-1000 then
+        //     on key_index_adjusted being 130, we adjust it to 1030
+        // We don't need this for the other inputs because their ranges are constant
+        if (perfcounter_xor > perfcounter_xor_max)
         {
-            /*****************************************
-             *                                       *
-             *             START ROTATION            *
-             *                                       *
-             *****************************************/
-
-            // Adjust the key_index to be unique per thread
-            key_index_adjusted = key_index;
-
+            key_index_adjusted += perfcounter_xor_keyspace_gpu - perfcounter_xor_max;
             perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
-            key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
-            // If the perfcounter_xor should have maxed out
-            // then increment the key_index_adjusted enough
-            // so that it overflows the min value by how much it overflowed the true max
-            // Ex: if the true range is from 0-100 but the fake range is 0-1000 then
-            //     on key_index_adjusted being 130, we adjust it to 1030
-            // We don't need this for the other inputs because their ranges are constant
-            if (perfcounter_xor > perfcounter_xor_max)
-            {
-                key_index_adjusted += perfcounter_xor_keyspace_gpu - perfcounter_xor_max;
-                perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
-            }
-
-            // Get the filetime
-            filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
-            key_index_adjusted = key_index_adjusted / filetime_keyspace;
-
-            // Get the pid
-            pid = (key_index_adjusted % pid_keyspace) * pid_and_tid_step + pid_min;
-            key_index_adjusted = key_index_adjusted / pid_keyspace;
-
-            // Get the tid
-            tid = (key_index_adjusted % tid_keyspace) * pid_and_tid_step + tid_min;
-            key_index_adjusted = key_index_adjusted / tid_keyspace;
-
-            // Set the perfcounter then reset the perfcounter_xor because
-            // we only get here when percounter has changed and therefore perfcounter_xor has changed
-            perfcounter = (key_index_adjusted % perfcounter_keyspace) + perfcounter_min;
-            key_index_adjusted = key_index_adjusted / perfcounter_keyspace;
-
-            perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
-            key_index_adjusted = key_index;
-            perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
-
-            // Actually set the keys into one var
-            //                                          // These comments represent what the data was in the original Phobos
-            input_data[0] = perfcounter_xor;                  // Second call to QueryPerformanceCounter() xor'd against GetTickCount(). The reason its the second call despite being the first key is in the original Phobos, it would call GetTickCount() first then later XOR it with a new call to QueryPerformanceCounter()
-            input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter()
-            input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter()
-            input_data[3] = pid;                              // GetCurrentProcessId()
-            input_data[4] = tid;                              // GetCurrentThreadId()
-            input_data[5] = (filetime >> 32) & 0xFFFFFFFF;    // GetLocalTime() + SystemTimeToFileTime()
-            input_data[6] = filetime & 0xFFFFFFFF;            // GetLocalTime() + SystemTimeToFileTime()
-            input_data[7] = (perfcounter >> 32) & 0xFFFFFFFF; // Second call to QueryPerformanceCounter(). I think the idea behind this is that sinces its the high bits, there is a "high probability" that the first call and second call to QueryPerformanceCounter() will have the same high bits // with high probability
-
-            // Mark the packet as ready to be hashed
-            status = PacketStatus::ReadyForSHA;
         }
+        key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
+        __syncwarp();
+
+        // Get the filetime
+        filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
+        key_index_adjusted = key_index_adjusted / filetime_keyspace;
+
+        // Get the pid
+        pid = (key_index_adjusted % pid_keyspace) * pid_and_tid_step + pid_min;
+        key_index_adjusted = key_index_adjusted / pid_keyspace;
+
+        // Get the tid
+        tid = (key_index_adjusted % tid_keyspace) * pid_and_tid_step + tid_min;
+        key_index_adjusted = key_index_adjusted / tid_keyspace;
+
+        // Actually set the keys into one var
+        //                                          // These comments represent what the data was in the original Phobos
+        input_data[0] = perfcounter_xor;                  // Second call to QueryPerformanceCounter() xor'd against GetTickCount(). The reason its the second call despite being the first key is in the original Phobos, it would call GetTickCount() first then later XOR it with a new call to QueryPerformanceCounter()
+        input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter()
+        input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter()
+        input_data[3] = pid;                              // GetCurrentProcessId()
+        input_data[4] = tid;                              // GetCurrentThreadId()
+        input_data[5] = (filetime >> 32) & 0xFFFFFFFF;    // GetLocalTime() + SystemTimeToFileTime()
+        input_data[6] = filetime & 0xFFFFFFFF;            // GetLocalTime() + SystemTimeToFileTime()
+        input_data[7] = (perfcounter >> 32) & 0xFFFFFFFF; // Second call to QueryPerformanceCounter(). I think the idea behind this is that sinces its the high bits, there is a "high probability" that the first call and second call to QueryPerformanceCounter() will have the same high bits // with high probability
 
         /*****************************************
          *                                       *
@@ -255,48 +237,39 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
          *                                       *
          *****************************************/
 
-        // Wait for all threads in the block to finish rotation to prevent warp divergence
-        // TODO: Check if this is actually faster or not
-        // __syncthreads();
-
         /*****************************************
          *                                       *
          *               START SHA               *
          *                                       *
          *****************************************/
-        if (status == PacketStatus::ReadyForSHA)
+
+        input_data[0] = __byte_perm(input_data[0], 0, 0x123);
+        input_data[1] = __byte_perm(input_data[1], 0, 0x123);
+        input_data[2] = __byte_perm(input_data[2], 0, 0x123);
+        input_data[3] = __byte_perm(input_data[3], 0, 0x123);
+        input_data[4] = __byte_perm(input_data[4], 0, 0x123);
+        input_data[5] = __byte_perm(input_data[5], 0, 0x123);
+        input_data[6] = __byte_perm(input_data[6], 0, 0x123);
+        input_data[7] = __byte_perm(input_data[7], 0, 0x123);
+
+        // TODO: Check if the first round is always applied or not in original Phobos
+        // This will always sha the first round and will always sha once more after it meets the criteria
+        sha256_transform(input_data);
+        while ((input_data[0] & 0xFF000000) != 0)
         {
-            is_done_running_sha_loop = false;
-#pragma unroll 8
-            for (i = 0; i < 8; ++i)
-            {
-                input_data[i] = __byte_perm(input_data[i], 0, 0x123);
-            }
-
-            // TODO: Check if the first round is always applied or not
-            for (i = 0; i < MAX_SHA_ROUNDS_PER_GPU_CALL; i++)
-            {
-                is_done_running_sha_loop = (input_data[0] & 0xFF000000) == 0 && i != 0;
-                sha256_transform(input_data);
-
-                // If we are all done running SHA then move onto the next step of SHA by breaking out of this for loop
-                if (is_done_running_sha_loop)
-                {
-                    break;
-                }
-            }
-
-#pragma unroll 8
-            for (i = 0; i < 8; ++i)
-                input_data[i] = __byte_perm(input_data[i], 0, 0x123);
-
-            // Mark the packet as ready for AES if we have finished running the SHA256_transform against it
-            // Otherwise the status will remain as ReadyForSHA and we will pick up where we left off
-            if (is_done_running_sha_loop)
-            {
-                status = PacketStatus::ReadyForAES;
-            }
+            sha256_transform(input_data);
         }
+        __syncwarp();
+        sha256_transform(input_data);
+
+        input_data[0] = __byte_perm(input_data[0], 0, 0x123);
+        input_data[1] = __byte_perm(input_data[1], 0, 0x123);
+        input_data[2] = __byte_perm(input_data[2], 0, 0x123);
+        input_data[3] = __byte_perm(input_data[3], 0, 0x123);
+        input_data[4] = __byte_perm(input_data[4], 0, 0x123);
+        input_data[5] = __byte_perm(input_data[5], 0, 0x123);
+        input_data[6] = __byte_perm(input_data[6], 0, 0x123);
+        input_data[7] = __byte_perm(input_data[7], 0, 0x123);
 
         /*****************************************
          *                                       *
@@ -304,122 +277,92 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
          *                                       *
          *****************************************/
 
-        // Wait for all threads in the block to finish SHA256_transform to prevent warp divergence
-        // TODO: Check if this is actually faster or not
-        // __syncthreads();
-
         /*****************************************
          *                                       *
          *               START AES               *
          *                                       *
          *****************************************/
 
-        if (status == PacketStatus::ReadyForAES)
+        // Upper half of the key is constant
+        mycpy16((uint32_t *)key, (uint32_t *)input_data);
+        mycpy16((uint32_t *)(key + 16), (uint32_t *)key_high);
+
+        // Copy the encypted data into a block for us to then try to decrypt with our key
+        mycpy16((uint32_t *)decrypted_data_block_cbc, (uint32_t *)ciphertext_gpu);
+
+        // Run the decryption, saving the results into decrypted_data_block_cbc
+        aes256_init(&ctx, key);
+        aes256_decrypt_ecb(&ctx, decrypted_data_block_cbc);
+
+        /*****************************************
+         *                                       *
+         *                END AES                *
+         *                                       *
+         *****************************************/
+
+        /*****************************************
+         *                                       *
+         *            START VALIDATION           *
+         *                                       *
+         *****************************************/
+
+        // Check if what we decrypted is identical to the plaintext
+        // This is actually after its been xor'd with the initialization vector
+        // which is denoted by the "cbc"
+        // We do this to save the time xor'ing in this loop, squeezing out a bit more performance
+        if (
+            decrypted_data_block_cbc[0] == plaintext_cbc_gpu[0] &&
+            decrypted_data_block_cbc[1] == plaintext_cbc_gpu[1] &&
+            decrypted_data_block_cbc[2] == plaintext_cbc_gpu[2] &&
+            decrypted_data_block_cbc[3] == plaintext_cbc_gpu[3] &&
+            decrypted_data_block_cbc[4] == plaintext_cbc_gpu[4] &&
+            decrypted_data_block_cbc[5] == plaintext_cbc_gpu[5] &&
+            decrypted_data_block_cbc[6] == plaintext_cbc_gpu[6] &&
+            decrypted_data_block_cbc[7] == plaintext_cbc_gpu[7] &&
+            decrypted_data_block_cbc[8] == plaintext_cbc_gpu[8] &&
+            decrypted_data_block_cbc[9] == plaintext_cbc_gpu[9] &&
+            decrypted_data_block_cbc[10] == plaintext_cbc_gpu[10] &&
+            decrypted_data_block_cbc[11] == plaintext_cbc_gpu[11] &&
+            decrypted_data_block_cbc[12] == plaintext_cbc_gpu[12] &&
+            decrypted_data_block_cbc[13] == plaintext_cbc_gpu[13] &&
+            decrypted_data_block_cbc[14] == plaintext_cbc_gpu[14] &&
+            decrypted_data_block_cbc[15] == plaintext_cbc_gpu[15])
         {
-            // Upper half of the key is constant
-            mycpy16((uint32_t *)key, (uint32_t *)input_data);
-            mycpy16((uint32_t *)(key + 16), (uint32_t *)key_high);
+            // If we get this far that means we found it!
+            // found_key_gpu_volatile = 1;
+            *found_key = true;
 
-            // Copy the encypted data into a block for us to then try to decrypt with our key
-            mycpy16((uint32_t *)decrypted_data_block_cbc, (uint32_t *)ciphertext_gpu);
+            // Some debugging statements
+            // printf("Thread %llu set found_key value.\n", thread_id);
+            // printf("filetime = %llu\n", filetime);
+            // printf("perfcounter = %llu\n", perfcounter);
+            // printf("PID = %llu\n", pid);
+            // printf("TID = %llu\n", tid);
 
-            // Run the decryption, saving the results into decrypted_data_block_cbc
-            aes256_init(&ctx, key);
-            aes256_decrypt_ecb(&ctx, decrypted_data_block_cbc);
+            // Copy the key that worked into a var that will later be copied down to host
+            mycpy16((uint32_t *)device_final_key, (uint32_t *)input_data);
+            mycpy16((uint32_t *)(device_final_key + 16), (uint32_t *)key_high);
 
-            /*****************************************
-             *                                       *
-             *                END AES                *
-             *                                       *
-             *****************************************/
-
-            // We are still in the ReadyForAES status loop because AES always finishes and validation is always next
-            // So there is no need to waste any cycles on adjusting the status
-
-            // Wait for all threads in the block to finish aes256_decrypt_ecb to prevent warp divergence
-            // TODO: Check if this is actually faster or not
-            // __syncthreads();
-
-            /*****************************************
-             *                                       *
-             *            START VALIDATION           *
-             *                                       *
-             *****************************************/
-
-            // Check if what we decrypted is identical to the plaintext
-            // This is actually after its been xor'd with the initialization vector
-            // which is denoted by the "cbc"
-            // We do this to save the time xor'ing in this loop, squeezing out a bit more performance
-            if (
-                decrypted_data_block_cbc[0] != plaintext_cbc_gpu[0] ||
-                decrypted_data_block_cbc[1] != plaintext_cbc_gpu[1] ||
-                decrypted_data_block_cbc[2] != plaintext_cbc_gpu[2] ||
-                decrypted_data_block_cbc[3] != plaintext_cbc_gpu[3] ||
-                decrypted_data_block_cbc[4] != plaintext_cbc_gpu[4] ||
-                decrypted_data_block_cbc[5] != plaintext_cbc_gpu[5] ||
-                decrypted_data_block_cbc[6] != plaintext_cbc_gpu[6] ||
-                decrypted_data_block_cbc[7] != plaintext_cbc_gpu[7] ||
-                decrypted_data_block_cbc[8] != plaintext_cbc_gpu[8] ||
-                decrypted_data_block_cbc[9] != plaintext_cbc_gpu[9] ||
-                decrypted_data_block_cbc[10] != plaintext_cbc_gpu[10] ||
-                decrypted_data_block_cbc[11] != plaintext_cbc_gpu[11] ||
-                decrypted_data_block_cbc[12] != plaintext_cbc_gpu[12] ||
-                decrypted_data_block_cbc[13] != plaintext_cbc_gpu[13] ||
-                decrypted_data_block_cbc[14] != plaintext_cbc_gpu[14] ||
-                decrypted_data_block_cbc[15] != plaintext_cbc_gpu[15])
-            {
-                // This was not a match so mark the key as ready for rotation
-                status = PacketStatus::ReadyForRotation;
-            }
-            else
-            {
-                // If we get this far that means we found it!
-                found_key_gpu_volatile = 1;
-                *found_key = true;
-
-                // Some debugging statements
-                // printf("Thread %llu set found_key value.\n", thread_id);
-                // printf("filetime = %llu\n", filetime);
-                // printf("perfcounter = %llu\n", perfcounter);
-                // printf("PID = %llu\n", pid);
-                // printf("TID = %llu\n", tid);
-
-                // Copy the key that worked into a var that will later be copied down to host
-                mycpy16((uint32_t *)device_final_key, (uint32_t *)input_data);
-                mycpy16((uint32_t *)(device_final_key + 16), (uint32_t *)key_high);
-
-                // Debug statement showing the key
-                //                 printf("AES Decryption Key [GPU]: 0x");
-                // #pragma unroll 32
-                //                 for (i = 0; i < 32; ++i)
-                //                 {
-                //                     printf("%02x", device_final_key[i]);
-                //                 }
-                //                 printf("\n");
-
-                // Since we found it, we mark this thread as done
-                status = PacketStatus::KeySpaceExhaustedOrKeyFound;
-                break;
-            }
-
-            // We fully tried this key so time to try the next one
-            key_index++;
-
-            /*****************************************
-             *                                       *
-             *             END VALIDATION            *
-             *                                       *
-             *****************************************/
-
-            // Wait for all threads in the block to finish validation to prevent warp divergence
-            // TODO: Check if this is actually faster or not
-            // __syncthreads();
+            // Debug statement showing the key
+            //                 printf("AES Decryption Key [GPU]: 0x");
+            // #pragma unroll 32
+            //                 for (i = 0; i < 32; ++i)
+            //                 {
+            //                     printf("%02x", device_final_key[i]);
+            //                 }
+            //                 printf("\n");
         }
+
+        /*****************************************
+         *                                       *
+         *             END VALIDATION            *
+         *                                       *
+         *****************************************/
+
+        // We fully tried this key so time to try the next one
+        key_index++;
     }
 
-    // Wait for all threads in the block to finish to prevent warp divergence
-    // TODO: Check if this is actually faster or not
-    // __syncthreads();
     return;
 }
 
@@ -611,11 +554,11 @@ uint64_t set_inputs_on_gpu()
     cudaMemcpyToSymbol(perfcounter_keyspace, &h_perfcounter_keyspace, sizeof(uint64_t));
     assert(h_perfcounter_min <= h_perfcounter_max);
 
-    const int h_filetime_step = 10000;
+    const uint16_t h_filetime_step = 10000;
     const uint64_t h_filetime_min = 132489479687990000;
     const uint64_t h_filetime_max = 132489479687990000;
     const uint64_t h_filetime_keyspace = (h_filetime_max - h_filetime_min + h_filetime_step) / h_filetime_step;
-    cudaMemcpyToSymbol(filetime_step, &h_filetime_step, sizeof(int));
+    cudaMemcpyToSymbol(filetime_step, &h_filetime_step, sizeof(uint16_t));
     cudaMemcpyToSymbol(filetime_min, &h_filetime_min, sizeof(uint64_t));
     cudaMemcpyToSymbol(filetime_max, &h_filetime_max, sizeof(uint64_t));
     cudaMemcpyToSymbol(filetime_keyspace, &h_filetime_keyspace, sizeof(uint64_t));
@@ -623,11 +566,11 @@ uint64_t set_inputs_on_gpu()
 
     const uint32_t h_pid_min = 3152;
     const uint32_t h_pid_max = 3152;
-    const int h_pid_and_tid_step = 4;
+    const uint8_t h_pid_and_tid_step = 4;
     const uint32_t h_pid_keyspace = (h_pid_max - h_pid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
     cudaMemcpyToSymbol(pid_min, &h_pid_min, sizeof(uint32_t));
     cudaMemcpyToSymbol(pid_max, &h_pid_max, sizeof(uint32_t));
-    cudaMemcpyToSymbol(pid_and_tid_step, &h_pid_and_tid_step, sizeof(int));
+    cudaMemcpyToSymbol(pid_and_tid_step, &h_pid_and_tid_step, sizeof(uint8_t));
     cudaMemcpyToSymbol(pid_keyspace, &h_pid_keyspace, sizeof(uint32_t));
     assert(h_pid_min <= h_pid_max);
 
@@ -809,7 +752,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     std::cout << "Keys Per Second: " << format_number(total_keyspace / seconds) << " kps" << std::endl;
     if (found_key)
     {
-        std::cout << "Warning: The keys per second is over estimated because the key was found and therefore not all keys in the keyspace were actually tested." << std::endl;
+        std::cout << "Warning: The keys per second is inaccurate because the key was found and therefore not all keys in the keyspace were actually tested." << std::endl;
     }
     std::cout << std::endl
               << std::endl;
