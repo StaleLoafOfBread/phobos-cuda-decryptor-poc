@@ -60,31 +60,25 @@ __device__ void deviceSwap(T &a, T &b)
 }
 
 // Variables that are read in from the json
-__constant__ uint64_t perfcounter_min;
-__constant__ uint64_t perfcounter_max;
-__constant__ uint64_t perfcounter_keyspace;
+__constant__ uint64_t perfcounter_min_d_constant;
+__constant__ uint64_t perfcounter_keyspace_d_constant;
 
-__constant__ uint16_t filetime_step;
-__constant__ uint64_t filetime_min;
-__constant__ uint64_t filetime_max;
-__constant__ uint64_t filetime_keyspace;
+__constant__ uint16_t filetime_step_d_constant;
+__constant__ uint64_t filetime_min_d_constant;
+__constant__ uint64_t filetime_keyspace_d_constant;
 
-__constant__ uint32_t pid_min;
-__constant__ uint32_t pid_max;
-__constant__ uint8_t pid_and_tid_step;
-__constant__ uint32_t pid_keyspace;
+__constant__ uint32_t pid_min_d_constant;
+__constant__ uint8_t pid_and_tid_step_d_constant;
+__constant__ uint32_t pid_keyspace_d_constant;
 
-__constant__ uint32_t tid_min;
-__constant__ uint32_t tid_max;
-__constant__ uint32_t tid_keyspace;
+__constant__ uint32_t tid_min_d_constant;
+__constant__ uint32_t tid_keyspace_d_constant;
 
-__constant__ uint32_t pc_step;
-__constant__ uint32_t pc_mask;
-__constant__ uint32_t gtc_prefix;
+__constant__ uint32_t pc_step_d_constant;
+__constant__ uint32_t pc_mask_d_constant;
+__constant__ uint32_t gtc_prefix_d_constant;
 
-__constant__ uint64_t perfcounter_xor_keyspace_gpu;
-
-__constant__ uint64_t total_keyspace_gpu;
+__constant__ uint64_t perfcounter_xor_keyspace_gpu_d_constant;
 
 __host__ void perfcounter_xor_set_host(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc, uint64_t min_gtc, uint64_t max_gtc)
 {
@@ -108,20 +102,20 @@ __host__ void perfcounter_xor_set_host(uint64_t *perfcounter_xor, uint64_t *perf
     *perfcounter_xor = *perfcounter_xor_min;
 }
 
-__device__ void perfcounter_xor_set_gpu(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc)
+__inline__ __device__ void perfcounter_xor_set_gpu(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc, uint32_t *gtc_prefix, uint32_t *pc_mask, uint32_t *pc_step)
 {
     const uint64_t max_pc = *min_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
 
-    uint64_t min_pc2 = *min_pc ^ gtc_prefix;
-    uint64_t max_pc2 = max_pc ^ gtc_prefix;
+    uint64_t min_pc2 = *min_pc ^ *gtc_prefix;
+    uint64_t max_pc2 = max_pc ^ *gtc_prefix;
     if (max_pc2 < min_pc2)
     {
         deviceSwap(min_pc2, max_pc2);
     }
 
     // Set the variables
-    *perfcounter_xor_min = (min_pc2 & pc_mask);
-    *perfcounter_xor_max = (max_pc2 & pc_mask) + pc_step;
+    *perfcounter_xor_min = (min_pc2 & *pc_mask);
+    *perfcounter_xor_max = (max_pc2 & *pc_mask) + *pc_step;
     *perfcounter_xor = *perfcounter_xor_min;
 }
 
@@ -134,6 +128,56 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     // For example, thread 0 will always start at index 0 but thread 1 may start at 1 if each thread only handles 1 key.
     // Reason for being signed: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#loop-counters-signed-vs-unsigned
     int64_t key_index = thread_id * baseKeysPerThread + (thread_id < remainingKeys ? thread_id : remainingKeys);
+
+    // Convert the constants to shared memory to avoid any coalescing issues
+    // https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory
+    // Info on why this shouldn't cause bank conflicts:
+    // However, if multiple threads’ requested addresses map to the same memory bank, the accesses are serialized. The hardware splits a conflicting memory request into as many separate conflict-free requests as necessary, decreasing the effective bandwidth by a factor equal to the number of colliding memory requests. An exception is the case where all threads in a warp address the same shared memory address, resulting in a broadcast. Devices of compute capability 2.0 and higher have the additional ability to multicast shared memory accesses, meaning that multiple accesses to the same location by any number of threads within a warp are served simultaneously.
+    // https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/
+    __shared__ uint64_t perfcounter_min;
+    __shared__ uint64_t perfcounter_keyspace;
+
+    __shared__ uint16_t filetime_step;
+    __shared__ uint64_t filetime_min;
+    __shared__ uint64_t filetime_keyspace;
+
+    __shared__ uint32_t pid_min;
+    __shared__ uint8_t pid_and_tid_step;
+    __shared__ uint32_t pid_keyspace;
+
+    __shared__ uint32_t tid_min;
+    __shared__ uint32_t tid_keyspace;
+
+    __shared__ uint32_t pc_step;
+    __shared__ uint32_t pc_mask;
+    __shared__ uint32_t gtc_prefix;
+
+    __shared__ uint64_t perfcounter_xor_keyspace_gpu;
+
+    // Set the variables from the first thread of the block
+    if (threadIdx.x == 0)
+    {
+        perfcounter_min = perfcounter_min_d_constant;
+        perfcounter_keyspace = perfcounter_keyspace_d_constant;
+
+        filetime_step = filetime_step_d_constant;
+        filetime_min = filetime_min_d_constant;
+        filetime_keyspace = filetime_keyspace_d_constant;
+
+        pid_min = pid_min_d_constant;
+        pid_and_tid_step = pid_and_tid_step_d_constant;
+        pid_keyspace = pid_keyspace_d_constant;
+
+        tid_min = tid_min_d_constant;
+        tid_keyspace = tid_keyspace_d_constant;
+
+        pc_step = pc_step_d_constant;
+        pc_mask = pc_mask_d_constant;
+        gtc_prefix = gtc_prefix_d_constant;
+
+        perfcounter_xor_keyspace_gpu = perfcounter_xor_keyspace_gpu_d_constant;
+    }
+    __syncthreads(); // We need to make sure all threads have the shared memory set before we continue
 
     // What key index to stop at
     // For example thead 0 will stop at index 1 if each thread only handles 1 key.
@@ -167,7 +211,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint64_t filetime = filetime_min;
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
-    perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
+    perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
 
     // These star blocks are representing functions
     // We aren't using actual functions so that we can have no overhead
@@ -176,7 +220,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
     // We keep checking unless the key was found, even by another thread
     // Within in the loop, if we exhaust our keyspace then we break
-    __syncthreads();
+    __syncwarp();
     while (key_index < endIdx && !*found_key)
     {
         /*****************************************
@@ -185,13 +229,10 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
          *                                       *
          *****************************************/
 
-        // Adjust the key_index to be unique per thread
-        key_index_adjusted = key_index;
-
         // Set the perfcounter then reset the perfcounter_xor because it may be different now
-        perfcounter = (key_index_adjusted % perfcounter_keyspace) + perfcounter_min;
-        key_index_adjusted = key_index_adjusted / perfcounter_keyspace;
-        perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
+        perfcounter = (key_index % perfcounter_keyspace) + perfcounter_min;
+        key_index_adjusted = key_index / perfcounter_keyspace;
+        perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
 
         perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
         // If the perfcounter_xor should have maxed out
@@ -205,8 +246,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
             key_index_adjusted += perfcounter_xor_keyspace_gpu - perfcounter_xor_max;
             perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
         }
-        key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
         __syncwarp();
+        key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
 
         // Get the filetime
         filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
@@ -218,7 +259,6 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
         // Get the tid
         tid = (key_index_adjusted % tid_keyspace) * pid_and_tid_step + tid_min;
-        key_index_adjusted = key_index_adjusted / tid_keyspace;
 
         // Actually set the keys into one var
         //                                          // These comments represent what the data was in the original Phobos
@@ -352,6 +392,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
             //                 }
             //                 printf("\n");
         }
+        __syncwarp();
 
         /*****************************************
          *                                       *
@@ -549,31 +590,28 @@ uint64_t set_inputs_on_gpu()
     const uint64_t h_perfcounter_min = 19084705045;
     const uint64_t h_perfcounter_max = 19084705050;
     const uint64_t h_perfcounter_keyspace = (h_perfcounter_max - h_perfcounter_min + 1);
-    cudaMemcpyToSymbol(perfcounter_min, &h_perfcounter_min, sizeof(uint64_t));
-    cudaMemcpyToSymbol(perfcounter_max, &h_perfcounter_max, sizeof(uint64_t));
-    cudaMemcpyToSymbol(perfcounter_keyspace, &h_perfcounter_keyspace, sizeof(uint64_t));
+    cudaMemcpyToSymbol(perfcounter_min_d_constant, &h_perfcounter_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(perfcounter_keyspace_d_constant, &h_perfcounter_keyspace, sizeof(uint64_t));
     assert(h_perfcounter_min <= h_perfcounter_max);
 
     const uint16_t h_filetime_step = 10000;
     const uint64_t h_filetime_min = 132489479687990000;
     const uint64_t h_filetime_max = 132489479687990000;
     const uint64_t h_filetime_keyspace = (h_filetime_max - h_filetime_min + h_filetime_step) / h_filetime_step;
-    cudaMemcpyToSymbol(filetime_step, &h_filetime_step, sizeof(uint16_t));
-    cudaMemcpyToSymbol(filetime_min, &h_filetime_min, sizeof(uint64_t));
-    cudaMemcpyToSymbol(filetime_max, &h_filetime_max, sizeof(uint64_t));
-    cudaMemcpyToSymbol(filetime_keyspace, &h_filetime_keyspace, sizeof(uint64_t));
+    cudaMemcpyToSymbol(filetime_step_d_constant, &h_filetime_step, sizeof(uint16_t));
+    cudaMemcpyToSymbol(filetime_min_d_constant, &h_filetime_min, sizeof(uint64_t));
+    cudaMemcpyToSymbol(filetime_keyspace_d_constant, &h_filetime_keyspace, sizeof(uint64_t));
     assert(h_filetime_min <= h_filetime_max);
-    assert(h_filetime_min % filetime_step == 0);
-    assert(h_filetime_max % filetime_step == 0);
+    assert(h_filetime_min % h_filetime_step == 0);
+    assert(h_filetime_max % h_filetime_step == 0);
 
     const uint32_t h_pid_min = 3152;
     const uint32_t h_pid_max = 3152;
     const uint8_t h_pid_and_tid_step = 4;
     const uint32_t h_pid_keyspace = (h_pid_max - h_pid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
-    cudaMemcpyToSymbol(pid_min, &h_pid_min, sizeof(uint32_t));
-    cudaMemcpyToSymbol(pid_max, &h_pid_max, sizeof(uint32_t));
-    cudaMemcpyToSymbol(pid_and_tid_step, &h_pid_and_tid_step, sizeof(uint8_t));
-    cudaMemcpyToSymbol(pid_keyspace, &h_pid_keyspace, sizeof(uint32_t));
+    cudaMemcpyToSymbol(pid_min_d_constant, &h_pid_min, sizeof(uint32_t));
+    cudaMemcpyToSymbol(pid_and_tid_step_d_constant, &h_pid_and_tid_step, sizeof(uint8_t));
+    cudaMemcpyToSymbol(pid_keyspace_d_constant, &h_pid_keyspace, sizeof(uint32_t));
     assert(h_pid_min <= h_pid_max);
     assert(h_pid_min % h_pid_and_tid_step == 0);
     assert(h_pid_max % h_pid_and_tid_step == 0);
@@ -581,9 +619,8 @@ uint64_t set_inputs_on_gpu()
     const uint32_t h_tid_min = 1488;
     const uint32_t h_tid_max = 1492;
     const uint32_t h_tid_keyspace = (h_tid_max - h_tid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
-    cudaMemcpyToSymbol(tid_min, &h_tid_min, sizeof(uint32_t));
-    cudaMemcpyToSymbol(tid_max, &h_tid_max, sizeof(uint32_t));
-    cudaMemcpyToSymbol(tid_keyspace, &h_tid_keyspace, sizeof(uint32_t));
+    cudaMemcpyToSymbol(tid_min_d_constant, &h_tid_min, sizeof(uint32_t));
+    cudaMemcpyToSymbol(tid_keyspace_d_constant, &h_tid_keyspace, sizeof(uint32_t));
     assert(h_tid_min <= h_tid_max);
     assert(h_tid_min % h_pid_and_tid_step == 0);
     assert(h_tid_max % h_pid_and_tid_step == 0);
@@ -595,16 +632,16 @@ uint64_t set_inputs_on_gpu()
     const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
     const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
     const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
-    cudaMemcpyToSymbol(pc_step, &h_pc_step, sizeof(uint32_t));
-    cudaMemcpyToSymbol(pc_mask, &h_pc_mask, sizeof(uint32_t));
-    cudaMemcpyToSymbol(gtc_prefix, &h_gtc_prefix, sizeof(uint32_t));
+    cudaMemcpyToSymbol(pc_step_d_constant, &h_pc_step, sizeof(uint32_t));
+    cudaMemcpyToSymbol(pc_mask_d_constant, &h_pc_mask, sizeof(uint32_t));
+    cudaMemcpyToSymbol(gtc_prefix_d_constant, &h_gtc_prefix, sizeof(uint32_t));
     assert(h_min_gtc <= h_max_gtc);
 
     std::cout << "Calculating perfcounter_xor keyspace" << std::endl;
     std::vector<uint64_t> recordedKeyspaces;
     uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces, h_min_gtc, h_max_gtc);
     std::cout << "Maximum perfcounter_xor keyspace: " << format_number(h_perfcounter_xor_keyspace) << std::endl;
-    cudaMemcpyToSymbol(perfcounter_xor_keyspace_gpu, &h_perfcounter_xor_keyspace, sizeof(uint64_t));
+    cudaMemcpyToSymbol(perfcounter_xor_keyspace_gpu_d_constant, &h_perfcounter_xor_keyspace, sizeof(uint64_t));
 
     std::cout << "\n\nCalculating total keyspace" << std::endl;
     const uint64_t total_keyspace_no_xor = h_perfcounter_keyspace * h_filetime_keyspace * h_pid_keyspace * h_tid_keyspace;
@@ -678,7 +715,6 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Copy inputs onto GPU memory and calculate the total keyspace
     uint64_t total_keyspace = set_inputs_on_gpu();
-    cudaMemcpyToSymbol(total_keyspace_gpu, &total_keyspace, sizeof(uint64_t));
 
     // Debug lines during speed testing
     const uint64_t estimated_kps = 4028352;
@@ -696,16 +732,21 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     // Between 128 and 256 threads per block is a good initial range for experimentation with different block sizes.
     // Use several smaller thread blocks rather than one large thread block per multiprocessor if latency affects performance. This is particularly beneficial to kernels that frequently call __syncthreads().
     // https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#thread-and-block-heuristics
-    const int threadsPerBlock = 64; // getMaxThreadsPerBlock(0); // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+    const int threadsPerBlock = 256; // getMaxThreadsPerBlock(0); // Set to the max threads per block for the first GPU seen. This may cause issues for clusters with mismatched GPUs
+
+    // Sometimes forcing threads to calculate more than 1 key (aka using fewer blocks) can lead to better performance
+    // Theres a theory that this should be a multiple of threadsPerBlock but that's just an unproven theory right now
+    const int target_keys_per_thread = 256;
 
     // We set the total number of blocks such that there is at least one thread per key unless that exceeds the GPU's max, in which case we use the max
-    const int numBlocks = (int)(std::min((uint64_t)getMaxBlocks(0), (uint64_t)((total_keyspace + threadsPerBlock - 1) / threadsPerBlock)));
+    const int numBlocks = ((int)(std::min((uint64_t)getMaxBlocks(0), (uint64_t)((total_keyspace + threadsPerBlock - 1) / threadsPerBlock)))) / target_keys_per_thread;
 
     const uint64_t totalThreads = (uint64_t)threadsPerBlock * (uint64_t)numBlocks;
     std::cout << "\n";
-    std::cout << "Total Blocks:      " << numBlocks << "\n";
-    std::cout << "Threads per block: " << threadsPerBlock << "\n";
-    std::cout << "Total Threads:     " << totalThreads << "\n";
+    std::cout << "Total Blocks:        " << numBlocks << "\n";
+    std::cout << "Threads per block:   " << threadsPerBlock << "\n";
+    std::cout << "Total Threads:       " << totalThreads << "\n";
+    std::cout << "Max Keys Per Thread: " << ((total_keyspace + totalThreads - 1) / totalThreads) << "\n"; // Rounds up
     std::cout << "\n";
 
     // Ensure we don't waste any threads
@@ -777,11 +818,12 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     auto gt2 = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(gt2 - gt1).count();
     double seconds = ((double)duration / 1000000);
-    std::cout << "\nTotal time: " << seconds << " seconds" << std::endl;
+    std::cout << "\nTotal time: " << formatDuration(seconds) << std::endl;
     std::cout << "Keys Per Second: " << format_number(total_keyspace / seconds) << " kps" << std::endl;
+    std::cout << "Keys Per Per Thread Per Second: " << format_number(total_keyspace / totalThreads / seconds) << std::endl;
     if (found_key)
     {
-        std::cout << "Warning: The keys per second is inaccurate because the key was found and therefore not all keys in the keyspace were actually tested." << std::endl;
+        std::cout << "Warning: Since the key was found, not all keys in the keyspace were actually tested, thus making the speed measurements inaccurate representations of how fast this GPU can try keys." << std::endl;
     }
     std::cout << std::endl
               << std::endl;
