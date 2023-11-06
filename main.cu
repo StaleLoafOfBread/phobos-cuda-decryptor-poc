@@ -382,8 +382,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
             // printf("Thread %llu set found_key value.\n", thread_id);
             // printf("filetime = %llu\n", filetime);
             // printf("perfcounter = %llu\n", perfcounter);
-            // printf("PID = %llu\n", pid);
-            // printf("TID = %llu\n", tid);
+            // printf("PID = %u\n", pid);
+            // printf("TID = %u\n", tid);
 
             // Copy the key that worked into a var that will later be copied down to host
             mycpy16((uint32_t *)device_final_key, (uint32_t *)input_data);
@@ -633,8 +633,8 @@ uint64_t set_inputs_on_gpu()
 
     // Initialize the vars for the second percounter call that's xor'd with the tick count
     std::cout << "Working on XOR Vars" << std::endl;
-    const uint32_t h_min_gtc = 1910437;
-    const uint32_t h_max_gtc = 1910437;
+    const uint32_t h_min_gtc = 1908471;
+    const uint32_t h_max_gtc = 1908471;
     const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
     const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
     const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
@@ -746,7 +746,14 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     const int target_keys_per_thread = 256;
 
     // We set the total number of blocks such that there is at least one thread per key unless that exceeds the GPU's max, in which case we use the max
-    const int numBlocks = ((int)(std::min((uint64_t)getMaxBlocks(0), (uint64_t)((total_keyspace + threadsPerBlock - 1) / threadsPerBlock)))) / target_keys_per_thread;
+    int numBlocks = ((int)(std::min(
+                        (uint64_t)getMaxBlocks(0),
+                        (uint64_t)((total_keyspace + threadsPerBlock - 1) / threadsPerBlock)))) /
+                    target_keys_per_thread;
+    if (numBlocks == 0)
+    {
+        numBlocks++;
+    }
 
     const uint64_t totalThreads = (uint64_t)threadsPerBlock * (uint64_t)numBlocks;
     std::cout << "\n";
@@ -758,6 +765,9 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Ensure we don't waste any threads
     assert((threadsPerBlock % 32) == 0);
+
+    // Ensure we don't accidently try 0 threads
+    assert(totalThreads > 0);
 
     // Set loop control vars for process_packet
     std::cout << "Copying loop control variables to GPU\n";
