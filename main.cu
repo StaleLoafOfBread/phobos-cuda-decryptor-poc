@@ -52,7 +52,7 @@ __constant__ const uint8_t key_high[] = {
 };
 
 template <typename T>
-__device__ void deviceSwap(T &a, T &b)
+__device__ __host__ void UniversalSwap(T &a, T &b)
 {
     T temp = a;
     a = b;
@@ -74,48 +74,35 @@ __constant__ uint32_t pid_keyspace_d_constant;
 __constant__ uint32_t tid_min_d_constant;
 __constant__ uint32_t tid_keyspace_d_constant;
 
-__constant__ uint32_t pc_step_d_constant;
-__constant__ uint32_t pc_mask_d_constant;
-__constant__ uint32_t gtc_prefix_d_constant;
+// __constant__ uint32_t pc_step_d_constant;
+// __constant__ uint32_t pc_mask_d_constant;
+// __constant__ uint32_t gtc_prefix_d_constant;
 
 __constant__ uint64_t perfcounter_xor_keyspace_gpu_d_constant;
 
-__host__ void perfcounter_xor_set_host(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc, uint64_t min_gtc, uint64_t max_gtc)
+__inline__ __device__ __host__ void perfcounter_xor_set(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *current_pc)
 {
-    uint64_t pc_step = uint64_t{1} << variable_suffix_bits(min_gtc, max_gtc);
+    uint64_t min_pc = *current_pc + MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+    uint64_t max_pc = *current_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+
+    // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
+    const uint32_t min_gtc = min_pc / 10000;
+    const uint32_t max_gtc = max_pc / 10000;
+
+    uint64_t pc_step = uint64_t{1} << variable_suffix_bits_optimized(min_gtc, max_gtc);
     uint64_t pc_mask = ~(pc_step - uint64_t{1});
     uint64_t gtc_prefix = (min_gtc & pc_mask);
 
-    uint64_t max_pc = *min_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
-
-    uint64_t min_pc2 = *min_pc ^ gtc_prefix;
-    uint64_t max_pc2 = max_pc ^ gtc_prefix;
-    if (max_pc2 < min_pc2)
+    min_pc = min_pc ^ gtc_prefix;
+    max_pc = max_pc ^ gtc_prefix;
+    if (max_pc < min_pc)
     {
-        std::swap(min_pc2, max_pc2);
+        UniversalSwap(min_pc, max_pc);
     }
 
     // Set the variables
-    *perfcounter_xor_min = (min_pc2 & pc_mask);
-    *perfcounter_xor_max = (max_pc2 & pc_mask) + pc_step;
-    // *perfcounter_xor_keyspace = (*perfcounter_xor_max - *perfcounter_xor_min + 1);
-    *perfcounter_xor = *perfcounter_xor_min;
-}
-
-__inline__ __device__ void perfcounter_xor_set_gpu(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *min_pc, uint32_t *gtc_prefix, uint32_t *pc_mask, uint32_t *pc_step)
-{
-    const uint64_t max_pc = *min_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
-
-    uint64_t min_pc2 = *min_pc ^ *gtc_prefix;
-    uint64_t max_pc2 = max_pc ^ *gtc_prefix;
-    if (max_pc2 < min_pc2)
-    {
-        deviceSwap(min_pc2, max_pc2);
-    }
-
-    // Set the variables
-    *perfcounter_xor_min = (min_pc2 & *pc_mask);
-    *perfcounter_xor_max = (max_pc2 & *pc_mask) + *pc_step;
+    *perfcounter_xor_min = (min_pc & pc_mask);
+    *perfcounter_xor_max = (max_pc & pc_mask) + pc_step;
     *perfcounter_xor = *perfcounter_xor_min;
 }
 
@@ -148,9 +135,9 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     __shared__ uint32_t tid_min;
     __shared__ uint32_t tid_keyspace;
 
-    __shared__ uint32_t pc_step;
-    __shared__ uint32_t pc_mask;
-    __shared__ uint32_t gtc_prefix;
+    // __shared__ uint32_t pc_step;
+    // __shared__ uint32_t pc_mask;
+    // __shared__ uint32_t gtc_prefix;
 
     __shared__ uint64_t perfcounter_xor_keyspace_gpu;
 
@@ -171,9 +158,9 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         tid_min = tid_min_d_constant;
         tid_keyspace = tid_keyspace_d_constant;
 
-        pc_step = pc_step_d_constant;
-        pc_mask = pc_mask_d_constant;
-        gtc_prefix = gtc_prefix_d_constant;
+        // pc_step = pc_step_d_constant;
+        // pc_mask = pc_mask_d_constant;
+        // gtc_prefix = gtc_prefix_d_constant;
 
         perfcounter_xor_keyspace_gpu = perfcounter_xor_keyspace_gpu_d_constant;
     }
@@ -211,7 +198,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint64_t filetime = filetime_min;
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
-    perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
+    perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
     __syncwarp();
 
     // These star blocks are representing functions
@@ -233,7 +220,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         // Set the perfcounter then reset the perfcounter_xor because it may be different now
         perfcounter = (key_index % perfcounter_keyspace) + perfcounter_min;
         key_index_adjusted = key_index / perfcounter_keyspace;
-        perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
+        perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
         __syncwarp();
 
         perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
@@ -549,7 +536,7 @@ int getMaxBlocks(int device_id)
     return deviceProp.maxGridSize[0];
 }
 
-__host__ uint64_t get_perfcounter_xor_keyspace(uint64_t perfcounter_min, uint64_t perfcounter_max, std::vector<uint64_t> &keyspaceRecord, uint64_t min_gtc, uint64_t max_gtc)
+__host__ uint64_t get_perfcounter_xor_keyspace(uint64_t perfcounter_min, uint64_t perfcounter_max, std::vector<uint64_t> &keyspaceRecord)
 {
     uint64_t perfcounter_xor = 0;
     uint64_t perfcounter_xor_min = 0;
@@ -562,7 +549,7 @@ __host__ uint64_t get_perfcounter_xor_keyspace(uint64_t perfcounter_min, uint64_
     for (uint64_t i = perfcounter_min; i <= perfcounter_max; i++)
     {
         // Calculate the xor range
-        perfcounter_xor_set_host(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &i, min_gtc, max_gtc);
+        perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &i);
 
         // Calculate the xor keyspace
         perfcounter_xor_keyspace_cur = (perfcounter_xor_max - perfcounter_xor_min + 1);
@@ -593,7 +580,7 @@ uint64_t set_inputs_on_gpu()
 {
     // Set the straight foward vars
     std::cout << "Setting input variables in GPU Memory" << std::endl;
-    const uint64_t h_perfcounter_min = 19084705045;
+    const uint64_t h_perfcounter_min = 19084704000;
     const uint64_t h_perfcounter_max = 19084705050;
     std::cout << "Perfcounter Min: " << h_perfcounter_min << std::endl;
     std::cout << "Perfcounter Max: " << h_perfcounter_max << std::endl;
@@ -640,21 +627,21 @@ uint64_t set_inputs_on_gpu()
     assert(h_tid_max % h_pid_and_tid_step == 0);
 
     // Initialize the vars for the second percounter call that's xor'd with the tick count
-    const uint32_t h_min_gtc = h_perfcounter_min / 10000; // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
-    const uint32_t h_max_gtc = h_perfcounter_max / 10000;
-    std::cout << "Tick Count Min: " << h_min_gtc << std::endl;
-    std::cout << "Tick Count Max: " << h_max_gtc << std::endl;
-    const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
-    const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
-    const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
-    cudaMemcpyToSymbol(pc_step_d_constant, &h_pc_step, sizeof(uint32_t));
-    cudaMemcpyToSymbol(pc_mask_d_constant, &h_pc_mask, sizeof(uint32_t));
-    cudaMemcpyToSymbol(gtc_prefix_d_constant, &h_gtc_prefix, sizeof(uint32_t));
-    assert(h_min_gtc <= h_max_gtc);
+    // const uint32_t h_min_gtc = h_perfcounter_min / 10000; // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
+    // const uint32_t h_max_gtc = h_perfcounter_max / 10000;
+    // std::cout << "Tick Count Min: " << h_min_gtc << std::endl;
+    // std::cout << "Tick Count Max: " << h_max_gtc << std::endl;
+    // const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
+    // const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
+    // const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
+    // cudaMemcpyToSymbol(pc_step_d_constant, &h_pc_step, sizeof(uint32_t));
+    // cudaMemcpyToSymbol(pc_mask_d_constant, &h_pc_mask, sizeof(uint32_t));
+    // cudaMemcpyToSymbol(gtc_prefix_d_constant, &h_gtc_prefix, sizeof(uint32_t));
+    // assert(h_min_gtc <= h_max_gtc);
 
     std::cout << "\nCalculating perfcounter_xor keyspace" << std::endl;
     std::vector<uint64_t> recordedKeyspaces;
-    uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces, h_min_gtc, h_max_gtc);
+    uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces);
     std::cout << "Maximum perfcounter_xor keyspace: " << format_number(h_perfcounter_xor_keyspace) << std::endl;
     cudaMemcpyToSymbol(perfcounter_xor_keyspace_gpu_d_constant, &h_perfcounter_xor_keyspace, sizeof(uint64_t));
 
