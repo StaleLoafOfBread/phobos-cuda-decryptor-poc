@@ -595,6 +595,8 @@ uint64_t set_inputs_on_gpu()
     std::cout << "Setting input variables in GPU Memory" << std::endl;
     const uint64_t h_perfcounter_min = 19084705045;
     const uint64_t h_perfcounter_max = 19084705050;
+    std::cout << "Perfcounter Min: " << h_perfcounter_min << std::endl;
+    std::cout << "Perfcounter Max: " << h_perfcounter_max << std::endl;
     const uint64_t h_perfcounter_keyspace = (h_perfcounter_max - h_perfcounter_min + 1);
     cudaMemcpyToSymbol(perfcounter_min_d_constant, &h_perfcounter_min, sizeof(uint64_t));
     cudaMemcpyToSymbol(perfcounter_keyspace_d_constant, &h_perfcounter_keyspace, sizeof(uint64_t));
@@ -603,6 +605,8 @@ uint64_t set_inputs_on_gpu()
     const uint16_t h_filetime_step = 10000;
     const uint64_t h_filetime_min = 132489479687990000;
     const uint64_t h_filetime_max = 132489479687990000;
+    std::cout << "Filetime Min: " << h_filetime_min << std::endl;
+    std::cout << "Filetime Max: " << h_filetime_max << std::endl;
     const uint64_t h_filetime_keyspace = (h_filetime_max - h_filetime_min + h_filetime_step) / h_filetime_step;
     cudaMemcpyToSymbol(filetime_step_d_constant, &h_filetime_step, sizeof(uint16_t));
     cudaMemcpyToSymbol(filetime_min_d_constant, &h_filetime_min, sizeof(uint64_t));
@@ -613,6 +617,8 @@ uint64_t set_inputs_on_gpu()
 
     const uint32_t h_pid_min = 3152;
     const uint32_t h_pid_max = 3152;
+    std::cout << "PID Min: " << h_pid_min << std::endl;
+    std::cout << "PID Max: " << h_pid_max << std::endl;
     const uint8_t h_pid_and_tid_step = 4;
     const uint32_t h_pid_keyspace = (h_pid_max - h_pid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
     cudaMemcpyToSymbol(pid_min_d_constant, &h_pid_min, sizeof(uint32_t));
@@ -624,6 +630,8 @@ uint64_t set_inputs_on_gpu()
 
     const uint32_t h_tid_min = 1488;
     const uint32_t h_tid_max = 1492;
+    std::cout << "TID Min: " << h_tid_min << std::endl;
+    std::cout << "TID Max: " << h_tid_max << std::endl;
     const uint32_t h_tid_keyspace = (h_tid_max - h_tid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
     cudaMemcpyToSymbol(tid_min_d_constant, &h_tid_min, sizeof(uint32_t));
     cudaMemcpyToSymbol(tid_keyspace_d_constant, &h_tid_keyspace, sizeof(uint32_t));
@@ -632,9 +640,10 @@ uint64_t set_inputs_on_gpu()
     assert(h_tid_max % h_pid_and_tid_step == 0);
 
     // Initialize the vars for the second percounter call that's xor'd with the tick count
-    std::cout << "Working on XOR Vars" << std::endl;
-    const uint32_t h_min_gtc = 1908471;
-    const uint32_t h_max_gtc = 1908471;
+    const uint32_t h_min_gtc = h_perfcounter_min / 10000; // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
+    const uint32_t h_max_gtc = h_perfcounter_max / 10000;
+    std::cout << "Tick Count Min: " << h_min_gtc << std::endl;
+    std::cout << "Tick Count Max: " << h_max_gtc << std::endl;
     const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
     const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
     const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
@@ -643,7 +652,7 @@ uint64_t set_inputs_on_gpu()
     cudaMemcpyToSymbol(gtc_prefix_d_constant, &h_gtc_prefix, sizeof(uint32_t));
     assert(h_min_gtc <= h_max_gtc);
 
-    std::cout << "Calculating perfcounter_xor keyspace" << std::endl;
+    std::cout << "\nCalculating perfcounter_xor keyspace" << std::endl;
     std::vector<uint64_t> recordedKeyspaces;
     uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces, h_min_gtc, h_max_gtc);
     std::cout << "Maximum perfcounter_xor keyspace: " << format_number(h_perfcounter_xor_keyspace) << std::endl;
@@ -661,16 +670,11 @@ uint64_t set_inputs_on_gpu()
     return total_keyspace;
 }
 
-std::string formatDuration(int seconds)
+std::string formatDuration(uint64_t seconds)
 {
-    if (seconds < 0)
-    {
-        return "Invalid input";
-    }
-
-    int hours = seconds / 3600;
-    int minutes = (seconds % 3600) / 60;
-    int remainingSeconds = seconds % 60;
+    uint64_t hours = seconds / 3600;
+    uint64_t minutes = (seconds % 3600) / 60;
+    uint64_t remainingSeconds = seconds % 60;
 
     std::string result = std::to_string(hours) + "h " +
                          std::to_string(minutes) + "m " +
