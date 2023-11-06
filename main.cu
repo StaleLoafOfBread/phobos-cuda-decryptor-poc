@@ -212,6 +212,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
     perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
+    __syncwarp();
 
     // These star blocks are representing functions
     // We aren't using actual functions so that we can have no overhead
@@ -233,6 +234,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         perfcounter = (key_index % perfcounter_keyspace) + perfcounter_min;
         key_index_adjusted = key_index / perfcounter_keyspace;
         perfcounter_xor_set_gpu(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter, &gtc_prefix, &pc_mask, &pc_step);
+        __syncwarp();
 
         perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
         // If the perfcounter_xor should have maxed out
@@ -295,12 +297,16 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         // TODO: Check if the first round is always applied or not in original Phobos
         // This will always sha the first round and will always sha once more after it meets the criteria
         sha256_transform(input_data);
+        __syncwarp();
         while ((input_data[0] & 0xFF000000) != 0)
         {
             sha256_transform(input_data);
+            // Since this is in the while loop I'm not sure if this will cause it to hang
+            // But having it here doubles the keys per second so leaving it here for now till I see it cause issues
+            __syncwarp();
         }
-        __syncwarp();
         sha256_transform(input_data);
+        __syncwarp();
 
         input_data[0] = __byte_perm(input_data[0], 0, 0x123);
         input_data[1] = __byte_perm(input_data[1], 0, 0x123);
@@ -717,7 +723,8 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
     uint64_t total_keyspace = set_inputs_on_gpu();
 
     // Debug lines during speed testing
-    const uint64_t estimated_kps = 4028352;
+    // const uint64_t estimated_kps = 4028352;
+    const uint64_t estimated_kps = 8000000;
     const uint64_t estimated_seconds = total_keyspace / estimated_kps;
     std::cout << "Assuming " << format_number(estimated_kps) << " keys per second this will take " << formatDuration(estimated_seconds) << std::endl;
 
