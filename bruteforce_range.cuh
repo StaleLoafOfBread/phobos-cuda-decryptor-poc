@@ -45,6 +45,7 @@ const uint64_t BATCH_SIZE = static_cast<uint64_t>(TARGET_GB) * 1024 * 1024 * 102
 
 // const unsigned int PACKETS_SIZE = BATCH_SIZE * sizeof(Packet);
 
+const int MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF = 500;
 const uint64_t MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF = 1000;
 
 template <typename T>
@@ -135,5 +136,5 @@ public:
     void limits(uint64_t start, uint64_t end);
 };
 
-uint64_t variable_suffix_bits(uint64_t a, uint64_t b);
-uint32_t variable_suffix_bits_optimized(uint32_t a, uint32_t b);
+__device__ __host__ uint64_t variable_suffix_bits(uint64_t a, uint64_t b);
+__device__ __host__ uint32_t variable_suffix_bits_optimized(uint32_t a, uint32_t b);
