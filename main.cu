@@ -537,7 +537,7 @@ uint64_t set_inputs_on_gpu()
     assert(h_pid_min % h_pid_and_tid_step == 0);
     assert(h_pid_max % h_pid_and_tid_step == 0);
 
-    const uint32_t h_tid_min = 800;
+    const uint32_t h_tid_min = 1492;
     const uint32_t h_tid_max = 1492;
     std::cout << "TID Min: " << h_tid_min << std::endl;
     std::cout << "TID Max: " << h_tid_max << std::endl;
@@ -556,13 +556,17 @@ uint64_t set_inputs_on_gpu()
 
 std::string formatDuration(uint64_t seconds)
 {
-    uint64_t hours = seconds / 3600;
-    uint64_t minutes = (seconds % 3600) / 60;
-    uint64_t remainingSeconds = seconds % 60;
+    int days = seconds / (3600 * 24);
+    int hours = (seconds % (3600 * 24)) / 3600;
+    int minutes = (seconds % 3600) / 60;
+    int remainingSeconds = seconds % 60;
 
-    std::string result = std::to_string(hours) + "h " +
-                         std::to_string(minutes) + "m " +
-                         std::to_string(remainingSeconds) + "s";
+    std::string result;
+    result += std::to_string(days) + "d ";
+    result += std::to_string(hours) + "h ";
+    result += std::to_string(minutes) + "m ";
+    result += std::to_string(remainingSeconds) + "s";
+
     return result;
 }
 
