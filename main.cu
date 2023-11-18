@@ -105,7 +105,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     __shared__ uint32_t tid_min;
     __shared__ uint32_t tid_keyspace;
 
-    __shared__ uint64_t perfcounter_xor_keyspace_gpu;
+    __shared__ int perfcounter_xor_min_ticks_diff;
+    __shared__ int perfcounter_xor_keyspace_gpu;
 
     // Set the variables from the first thread of the block
     if (threadIdx.x == 0)
@@ -124,7 +125,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         tid_min = tid_min_d_constant;
         tid_keyspace = tid_keyspace_d_constant;
 
-        perfcounter_xor_keyspace_gpu = perfcounter_xor_keyspace_gpu_d_constant;
+        perfcounter_xor_min_ticks_diff = MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+        perfcounter_xor_keyspace_gpu = PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE;
     }
     __syncthreads(); // We need to make sure all threads have the shared memory set before we continue
 
@@ -186,8 +188,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         // 2nd xor that with the second call to QueryPerformanceCounter(), though since we don't know exactly, its a range of possible values we work through for each key_index_adjusted
         // TODO: try the GetTickCount() for one percounter in the future to handle edge cases
         perfcounter_xor = perfcounter / 10000; // Simulate GetTickCount()
-        perfcounter_xor ^= perfcounter + (key_index_adjusted % PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE) + MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
-        key_index_adjusted /= PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE;
+        perfcounter_xor ^= perfcounter + (key_index_adjusted % perfcounter_xor_keyspace_gpu) + perfcounter_xor_min_ticks_diff;
+        key_index_adjusted /= perfcounter_xor_keyspace_gpu;
 
         // Get the filetime
         filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
@@ -203,8 +205,8 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         // Actually set the keys into one var
         //                                          // These comments represent what the data was in the original Phobos
         input_data[0] = perfcounter_xor;                  // Second call to QueryPerformanceCounter() xor'd against GetTickCount(). The reason its the second call despite being the first key is in the original Phobos, it would call GetTickCount() first then later XOR it with a new call to QueryPerformanceCounter()
-        input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter()
-        input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter()
+        input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter() high bits
+        input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter() low bits
         input_data[3] = pid;                              // GetCurrentProcessId()
         input_data[4] = tid;                              // GetCurrentThreadId()
         input_data[5] = (filetime >> 32) & 0xFFFFFFFF;    // GetLocalTime() + SystemTimeToFileTime()
@@ -535,7 +537,7 @@ uint64_t set_inputs_on_gpu()
     assert(h_pid_min % h_pid_and_tid_step == 0);
     assert(h_pid_max % h_pid_and_tid_step == 0);
 
-    const uint32_t h_tid_min = 4;
+    const uint32_t h_tid_min = 800;
     const uint32_t h_tid_max = 1492;
     std::cout << "TID Min: " << h_tid_min << std::endl;
     std::cout << "TID Max: " << h_tid_max << std::endl;
