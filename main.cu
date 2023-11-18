@@ -74,37 +74,7 @@ __constant__ uint32_t pid_keyspace_d_constant;
 __constant__ uint32_t tid_min_d_constant;
 __constant__ uint32_t tid_keyspace_d_constant;
 
-// __constant__ uint32_t pc_step_d_constant;
-// __constant__ uint32_t pc_mask_d_constant;
-// __constant__ uint32_t gtc_prefix_d_constant;
-
 __constant__ uint64_t perfcounter_xor_keyspace_gpu_d_constant;
-
-__inline__ __device__ __host__ void perfcounter_xor_set(uint64_t *perfcounter_xor, uint64_t *perfcounter_xor_min, uint64_t *perfcounter_xor_max, uint64_t *current_pc)
-{
-    uint64_t min_pc = *current_pc + MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
-    uint64_t max_pc = *current_pc + MAX_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
-
-    // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
-    const uint32_t min_gtc = min_pc / 10000;
-    const uint32_t max_gtc = max_pc / 10000;
-
-    uint64_t pc_step = uint64_t{1} << variable_suffix_bits_optimized(min_gtc, max_gtc);
-    uint64_t pc_mask = ~(pc_step - uint64_t{1});
-    uint64_t gtc_prefix = (min_gtc & pc_mask);
-
-    min_pc = min_pc ^ gtc_prefix;
-    max_pc = max_pc ^ gtc_prefix;
-    if (max_pc < min_pc)
-    {
-        UniversalSwap(min_pc, max_pc);
-    }
-
-    // Set the variables
-    *perfcounter_xor_min = (min_pc & pc_mask);
-    *perfcounter_xor_max = (max_pc & pc_mask) + pc_step;
-    *perfcounter_xor = *perfcounter_xor_min;
-}
 
 __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 {
@@ -135,10 +105,6 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     __shared__ uint32_t tid_min;
     __shared__ uint32_t tid_keyspace;
 
-    // __shared__ uint32_t pc_step;
-    // __shared__ uint32_t pc_mask;
-    // __shared__ uint32_t gtc_prefix;
-
     __shared__ uint64_t perfcounter_xor_keyspace_gpu;
 
     // Set the variables from the first thread of the block
@@ -157,10 +123,6 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
         tid_min = tid_min_d_constant;
         tid_keyspace = tid_keyspace_d_constant;
-
-        // pc_step = pc_step_d_constant;
-        // pc_mask = pc_mask_d_constant;
-        // gtc_prefix = gtc_prefix_d_constant;
 
         perfcounter_xor_keyspace_gpu = perfcounter_xor_keyspace_gpu_d_constant;
     }
@@ -198,8 +160,6 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint64_t filetime = filetime_min;
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
-    perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
-    __syncwarp();
 
     // These star blocks are representing functions
     // We aren't using actual functions so that we can have no overhead
@@ -220,31 +180,22 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         // Set the perfcounter then reset the perfcounter_xor because it may be different now
         perfcounter = (key_index % perfcounter_keyspace) + perfcounter_min;
         key_index_adjusted = key_index / perfcounter_keyspace;
-        perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &perfcounter);
-        __syncwarp();
 
-        perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
-        // If the perfcounter_xor should have maxed out
-        // then increment the key_index_adjusted enough
-        // so that it overflows the min value by how much it overflowed the true max
-        // Ex: if the true range is from 0-100 but the fake range is 0-1000 then
-        //     on key_index_adjusted being 130, we adjust it to 1030
-        // We don't need this for the other inputs because their ranges are constant
-        if (perfcounter_xor > perfcounter_xor_max)
-        {
-            key_index_adjusted += perfcounter_xor_keyspace_gpu - perfcounter_xor_max;
-            perfcounter_xor = perfcounter_xor_min + (key_index_adjusted % perfcounter_xor_keyspace_gpu);
-        }
-        __syncwarp();
-        key_index_adjusted = key_index_adjusted / perfcounter_xor_keyspace_gpu;
+        // Calculate what the perfcounter_xor is
+        // 1st calculate the GetTickCount() based on the initial perfcounter's value
+        // 2nd xor that with the second call to QueryPerformanceCounter(), though since we don't know exactly, its a range of possible values we work through for each key_index_adjusted
+        // TODO: try the GetTickCount() for one percounter in the future to handle edge cases
+        perfcounter_xor = perfcounter / 10000; // Simulate GetTickCount()
+        perfcounter_xor ^= perfcounter + (key_index_adjusted % PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE) + MIN_PERFCOUNTER_SECOND_CALL_TICKS_DIFF;
+        key_index_adjusted /= PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE;
 
         // Get the filetime
         filetime = (key_index_adjusted % filetime_keyspace) * filetime_step + filetime_min;
-        key_index_adjusted = key_index_adjusted / filetime_keyspace;
+        key_index_adjusted /= filetime_keyspace;
 
         // Get the pid
         pid = (key_index_adjusted % pid_keyspace) * pid_and_tid_step + pid_min;
-        key_index_adjusted = key_index_adjusted / pid_keyspace;
+        key_index_adjusted /= pid_keyspace;
 
         // Get the tid
         tid = (key_index_adjusted % tid_keyspace) * pid_and_tid_step + tid_min;
@@ -536,37 +487,6 @@ int getMaxBlocks(int device_id)
     return deviceProp.maxGridSize[0];
 }
 
-__host__ uint64_t get_perfcounter_xor_keyspace(uint64_t perfcounter_min, uint64_t perfcounter_max, std::vector<uint64_t> &keyspaceRecord)
-{
-    uint64_t perfcounter_xor = 0;
-    uint64_t perfcounter_xor_min = 0;
-    uint64_t perfcounter_xor_max = 0;
-
-    // Vars to store the keyspace so we can find the largest one
-    uint64_t perfcounter_xor_keyspace_max = 0;
-    uint64_t perfcounter_xor_keyspace_cur = 0;
-
-    for (uint64_t i = perfcounter_min; i <= perfcounter_max; i++)
-    {
-        // Calculate the xor range
-        perfcounter_xor_set(&perfcounter_xor, &perfcounter_xor_min, &perfcounter_xor_max, &i);
-
-        // Calculate the xor keyspace
-        perfcounter_xor_keyspace_cur = (perfcounter_xor_max - perfcounter_xor_min + 1);
-
-        // Record xor keyspace so we can later calculate the total keyspace
-        keyspaceRecord.push_back(perfcounter_xor_keyspace_cur);
-
-        // Record the highest keyspace we found so we know what use as its upperbound in GPU
-        if (perfcounter_xor_keyspace_cur > perfcounter_xor_keyspace_max)
-        {
-            perfcounter_xor_keyspace_max = perfcounter_xor_keyspace_cur;
-        }
-    }
-
-    return perfcounter_xor_keyspace_max;
-}
-
 std::string format_number(uint64_t value)
 {
     std::stringstream ss;
@@ -615,7 +535,7 @@ uint64_t set_inputs_on_gpu()
     assert(h_pid_min % h_pid_and_tid_step == 0);
     assert(h_pid_max % h_pid_and_tid_step == 0);
 
-    const uint32_t h_tid_min = 1488;
+    const uint32_t h_tid_min = 4;
     const uint32_t h_tid_max = 1492;
     std::cout << "TID Min: " << h_tid_min << std::endl;
     std::cout << "TID Max: " << h_tid_max << std::endl;
@@ -626,34 +546,9 @@ uint64_t set_inputs_on_gpu()
     assert(h_tid_min % h_pid_and_tid_step == 0);
     assert(h_tid_max % h_pid_and_tid_step == 0);
 
-    // Initialize the vars for the second percounter call that's xor'd with the tick count
-    // const uint32_t h_min_gtc = h_perfcounter_min / 10000; // Tick count is milliseconds since boot and perfcounter increments once every 1/10,000,000 of a second. Technically that is defined by QueryPerformanceFrequency() but in practice hard coding to 10,000,000 seems to work
-    // const uint32_t h_max_gtc = h_perfcounter_max / 10000;
-    // std::cout << "Tick Count Min: " << h_min_gtc << std::endl;
-    // std::cout << "Tick Count Max: " << h_max_gtc << std::endl;
-    // const uint32_t h_pc_step = uint32_t{1} << variable_suffix_bits_optimized(h_min_gtc, h_max_gtc);
-    // const uint32_t h_pc_mask = ~(h_pc_step - uint32_t{1});
-    // const uint32_t h_gtc_prefix = (h_min_gtc & h_pc_mask);
-    // cudaMemcpyToSymbol(pc_step_d_constant, &h_pc_step, sizeof(uint32_t));
-    // cudaMemcpyToSymbol(pc_mask_d_constant, &h_pc_mask, sizeof(uint32_t));
-    // cudaMemcpyToSymbol(gtc_prefix_d_constant, &h_gtc_prefix, sizeof(uint32_t));
-    // assert(h_min_gtc <= h_max_gtc);
-
-    std::cout << "\nCalculating perfcounter_xor keyspace" << std::endl;
-    std::vector<uint64_t> recordedKeyspaces;
-    uint64_t h_perfcounter_xor_keyspace = get_perfcounter_xor_keyspace(h_perfcounter_min, h_perfcounter_max, recordedKeyspaces);
-    std::cout << "Maximum perfcounter_xor keyspace: " << format_number(h_perfcounter_xor_keyspace) << std::endl;
-    cudaMemcpyToSymbol(perfcounter_xor_keyspace_gpu_d_constant, &h_perfcounter_xor_keyspace, sizeof(uint64_t));
-
     std::cout << "\n\nCalculating total keyspace" << std::endl;
-    const uint64_t total_keyspace_no_xor = h_perfcounter_keyspace * h_filetime_keyspace * h_pid_keyspace * h_tid_keyspace;
-    uint64_t total_keyspace = 0;
-    for (const auto &value : recordedKeyspaces)
-    {
-        total_keyspace += value * total_keyspace_no_xor;
-    }
-    std::cout << "Total keyspace: " << format_number(total_keyspace) << "\n"
-              << std::endl;
+    const uint64_t total_keyspace = h_perfcounter_keyspace * h_filetime_keyspace * h_pid_keyspace * h_tid_keyspace * PERFCOUNTER_SECOND_CALL_TICKS_KEYSPACE;
+    std::cout << "Total keyspace: " << format_number(total_keyspace) << "\n\n";
     return total_keyspace;
 }
 
@@ -715,7 +610,7 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Debug lines during speed testing
     // const uint64_t estimated_kps = 4028352;
-    const uint64_t estimated_kps = 8000000;
+    const uint64_t estimated_kps = 6000000;
     const uint64_t estimated_seconds = total_keyspace / estimated_kps;
     std::cout << "Assuming " << format_number(estimated_kps) << " keys per second this will take " << formatDuration(estimated_seconds) << std::endl;
 

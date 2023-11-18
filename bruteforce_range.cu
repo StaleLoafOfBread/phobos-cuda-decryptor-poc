@@ -27,6 +27,7 @@ uint64_t variable_suffix_bits(uint64_t a, uint64_t b)
     return suffix_len;
 }
 
+// Returns how many bits must be removed before the two inputs are the same
 __device__ __host__ uint32_t variable_suffix_bits_optimized(uint32_t a, uint32_t b)
 {
     uint32_t suffix_len = 0;
