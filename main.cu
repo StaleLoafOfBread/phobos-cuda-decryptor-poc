@@ -149,24 +149,13 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     // Reason for being signed: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#loop-counters-signed-vs-unsigned
     int64_t key_index_adjusted = 0;
 
-    // Since perfcounter_xor's range depends on the current value of perfcounter
-    // we need to track it per thread
-    // This section initializes vars for that purpose
-    uint64_t perfcounter_xor_min;
-    uint64_t perfcounter_xor_max;
-
     // Vars to control the current values of the various inputs that go into a key
     // Initialize them all to their lowest possible value as start low and work our way up
-    uint64_t perfcounter_xor;
+    uint32_t perfcounter_xor;
     uint64_t perfcounter = perfcounter_min;
     uint64_t filetime = filetime_min;
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
-
-    // These star blocks are representing functions
-    // We aren't using actual functions so that we can have no overhead
-    // and directly pass around the data var
-    // Perhaps using pointers would work just as well?
 
     // We keep checking unless the key was found, even by another thread
     // Within in the loop, if we exhaust our keyspace then we break
@@ -203,7 +192,7 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
         tid = (key_index_adjusted % tid_keyspace) * pid_and_tid_step + tid_min;
 
         // Actually set the keys into one var
-        //                                          // These comments represent what the data was in the original Phobos
+        //                                                // These comments represent what the data was in the original Phobos
         input_data[0] = perfcounter_xor;                  // Second call to QueryPerformanceCounter() xor'd against GetTickCount(). The reason its the second call despite being the first key is in the original Phobos, it would call GetTickCount() first then later XOR it with a new call to QueryPerformanceCounter()
         input_data[1] = (perfcounter >> 32) & 0xFFFFFFFF; // First call to QueryPerformanceCounter() high bits
         input_data[2] = perfcounter & 0xFFFFFFFF;         // First call to QueryPerformanceCounter() low bits
@@ -502,7 +491,7 @@ uint64_t set_inputs_on_gpu()
 {
     // Set the straight foward vars
     std::cout << "Setting input variables in GPU Memory" << std::endl;
-    const uint64_t h_perfcounter_min = 19084704000;
+    const uint64_t h_perfcounter_min = 19084705050;
     const uint64_t h_perfcounter_max = 19084705050;
     std::cout << "Perfcounter Min: " << h_perfcounter_min << std::endl;
     std::cout << "Perfcounter Max: " << h_perfcounter_max << std::endl;
@@ -635,7 +624,8 @@ int brute(const PhobosInstance &phobos, BruteforceRange *range)
 
     // Sometimes forcing threads to calculate more than 1 key (aka using fewer blocks) can lead to better performance
     // Theres a theory that this should be a multiple of threadsPerBlock but that's just an unproven theory right now
-    const int target_keys_per_thread = 256;
+    // Theres another that it should be a multiple of 32. Small amounts of testing shows little difference between the two theories though the closer to being the same seems to be bettwe. Both have gains over setting it to 1. More testing is absolutely required.
+    const int target_keys_per_thread = threadsPerBlock;
 
     // We set the total number of blocks such that there is at least one thread per key unless that exceeds the GPU's max, in which case we use the max
     int numBlocks = ((int)(std::min(
