@@ -86,5 +86,8 @@ The script was tested and **should** compile/work on:
 
 * `Cuda compilation tools, release 10.1, V10.1.243`
 * `Cuda compilation tools, release 11.1, V11.1.105`
+* `Cuda compilation tools, release 12.3, V12.3.103`
 * `GeForce RTX 2080` - `Driver Version: 450.66       CUDA Version: 11.0`
 * `GeForce GTX 1050` - `Driver Version: 526.47       CUDA Version: 12.0`
+* `GeForce GTX 4080` - `Driver Version: 545.23.08       CUDA Version: 12.3`
+
