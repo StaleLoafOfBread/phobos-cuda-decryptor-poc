@@ -1,0 +1,41 @@
+ID 0
+--------------------------
+key_index:            0
+key_index_adjusted:   0
+total_threads:        19840
+perfcounter_xor:      19085417407
+perfcounter:          19084705050
+pid:                  3152
+tid:                  1492
+filetime:             132489479687990000
+--------------------------
+key_index:            1
+key_index_adjusted:   1
+total_threads:        19840
+perfcounter_xor:      19085417408
+perfcounter:          19084705050
+pid:                  3152
+tid:                  1492
+filetime:             132489479687990000
+--------------------------
+
+ID 1
+--------------------------
+key_index:            0
+key_index_adjusted:   19840
+total_threads:        19840
+perfcounter_xor:      19085417813
+perfcounter:          19084705050
+pid:                  3152
+tid:                  1492
+filetime:             132489479687990000
+--------------------------
+key_index:            1
+key_index_adjusted:   19841
+total_threads:        19840
+perfcounter_xor:      19085417814
+perfcounter:          19084705050
+pid:                  3152
+tid:                  1492
+filetime:             132489479687990000
+--------------------------

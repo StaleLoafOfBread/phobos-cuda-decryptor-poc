@@ -1,0 +1,56 @@
+should change the order of the key generation so that xor is first and percounter is last
+This will make fewer calls to perfcounter_xor_set()
+
+switch to uint16_t and uint8_t
+
+
+min_gtc         = 1906437
+max_gtc         = 1910437
+filetime        = 132489479687990000
+perfcounter     = 19084705050
+perfcounter_xor = 19085434712
+PID             = 3152
+TID             = 1492
+AES Decryption Key [GPU]: 0x7cca0783d30e45f5e5b47d7f69afd6320ddb950c3368c0a006e90c2444881b12
+
+Second Perfcounter value = 19084706222
+Perfcounter delta = 1172
+
+
+thread_id:            17305
+key_index:            17305
+key_index_adjusted:   17305
+total_threads:        19520
+perfcounter_xor:      19085434712
+perfcounter:          19084705050
+pid:                  3152
+tid:                  1492
+filetime:             132489479687990000
+
+
+
+input_data[0] = 1905565528
+input_data[1] = 4
+input_data[2] = 1904835866
+input_data[3] = 3152
+input_data[4] = 1492
+input_data[5] = 30847610
+input_data[6] = 3578227440
+input_data[7] = 4
+
+
+
+RNDr(S, WH, 11);
+RNDr(S, WH, 12);
+RNDr(S, WH, 15);
+RNDr(S, W, 49);
+RNDr(S, W, 52);
+
+
+1906437
+1908470
+1910437
+
+
+
+19085434712

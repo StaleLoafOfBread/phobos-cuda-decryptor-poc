@@ -1,8 +1,16 @@
+<<<<<<< Updated upstream
 import sys
+=======
+>>>>>>> Stashed changes
 from Crypto.Cipher import AES
 import struct
 import os
 
+<<<<<<< Updated upstream
+=======
+# https://github.com/rivitna/Malware/blob/main/Phobos/phobos_decrypt_file.py
+
+>>>>>>> Stashed changes
 # Encrypted file format:
 #     data: N bytes
 #     footer (metadata): 178 bytes
@@ -57,6 +65,7 @@ def decrypt_file(input_path, output_path, key):
             fout.write(decrypted_data)
 
 
+<<<<<<< Updated upstream
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise Exception("You must provide a 128 bit key in hex format!")
@@ -71,3 +80,7 @@ if __name__ == "__main__":
 
     # Actually run the decryption
     decrypt_file("./sample_data/tofu.enc", "./test.jpg", key)
+=======
+key = bytes.fromhex("7cca0783d30e45f5e5b47d7f69afd6320ddb950c3368c0a006e90c2444881b12")  # DevSkim: ignore DS117838
+decrypt_file("./sample_data/tofu.enc", "./test.jpg", key)
+>>>>>>> Stashed changes

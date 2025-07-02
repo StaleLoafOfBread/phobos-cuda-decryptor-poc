@@ -157,6 +157,11 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
     uint32_t pid = pid_min;
     uint32_t tid = tid_min;
 
+    uint32_t W[64]; // only 4 of these are accessed during each partial Mix
+    uint32_t S[8] = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
     // We keep checking unless the key was found, even by another thread
     // Within in the loop, if we exhaust our keyspace then we break
     __syncwarp();
@@ -225,17 +230,19 @@ __global__ void process_packet(bool *found_key, uint8_t *device_final_key)
 
         // TODO: Check if the first round is always applied or not in original Phobos
         // This will always sha the first round and will always sha once more after it meets the criteria
-        sha256_transform(input_data);
-        __syncwarp();
-        while ((input_data[0] & 0xFF000000) != 0)
-        {
-            sha256_transform(input_data);
-            // Since this is in the while loop I'm not sure if this will cause it to hang
-            // But having it here doubles the keys per second so leaving it here for now till I see it cause issues
-            __syncwarp();
-        }
-        sha256_transform(input_data);
-        __syncwarp();
+        // sha256_transform(input_data);
+        // __syncwarp();
+        // while ((input_data[0] & 0xFF000000) != 0)
+        // {
+        //     sha256_transform(input_data);
+        //     // Since this is in the while loop I'm not sure if this will cause it to hang
+        //     // But having it here doubles the keys per second so leaving it here for now till I see it cause issues
+        //     __syncwarp();
+        // }
+        // sha256_transform(input_data);
+        // __syncwarp();
+
+        sha256_transform_for_phobos(input_data, W, S);
 
         input_data[0] = __byte_perm(input_data[0], 0, 0x123);
         input_data[1] = __byte_perm(input_data[1], 0, 0x123);
@@ -491,7 +498,7 @@ uint64_t set_inputs_on_gpu()
 {
     // Set the straight foward vars
     std::cout << "Setting input variables in GPU Memory" << std::endl;
-    const uint64_t h_perfcounter_min = 19084705050;
+    const uint64_t h_perfcounter_min = 19044005050;
     const uint64_t h_perfcounter_max = 19084705050;
     std::cout << "Perfcounter Min: " << h_perfcounter_min << std::endl;
     std::cout << "Perfcounter Max: " << h_perfcounter_max << std::endl;
@@ -526,8 +533,8 @@ uint64_t set_inputs_on_gpu()
     assert(h_pid_min % h_pid_and_tid_step == 0);
     assert(h_pid_max % h_pid_and_tid_step == 0);
 
-    const uint32_t h_tid_min = 1492;
-    const uint32_t h_tid_max = 1492;
+    const uint32_t h_tid_min = 4;
+    const uint32_t h_tid_max = 4;
     std::cout << "TID Min: " << h_tid_min << std::endl;
     std::cout << "TID Max: " << h_tid_max << std::endl;
     const uint32_t h_tid_keyspace = (h_tid_max - h_tid_min + h_pid_and_tid_step) / h_pid_and_tid_step;
